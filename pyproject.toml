@@ -1,9 +1,0 @@
-[build-system]
-# setup.py does not import airunner_common at build time (this package's
-# own metadata is self-contained), so an isolated build only needs
-# setuptools+wheel from the index -- this package has no torch
-# dependency at all, unlike its sibling airunner/airunner-services
-# packages in the source repository, which do pin an upper bound for a
-# torch wheel metadata quirk.
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"

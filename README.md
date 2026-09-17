@@ -1,82 +1,61 @@
 # airunner-native
 
-The launcher entry point, crash handler, and pinned native runtime
-sidecar (`llama.cpp` / `whisper.cpp`) build tooling for
+Pinned native runtime sidecar (`llama.cpp` / `whisper.cpp`) build
+tooling for
 [Capsize-Games/airunner](https://github.com/Capsize-Games/airunner)
-(AI Runner). Extracted into its own repository (issue
-[#2196](https://github.com/Capsize-Games/airunner/issues/2196), part of
-the repository-split tracker
-[#2185](https://github.com/Capsize-Games/airunner/issues/2185)) because
-its release cadence is not Python's: the sidecar build changes when a
-pinned native runtime changes, rarely and for reasons unrelated to
-application code, and needs `cmake`/`mingw-w64`/`ninja` rather than a
-Python packaging toolchain.
+(AI Runner).
 
-AIRunner itself is a pure Python application -- there is no compiled
-C++ launcher and no bundle/installer packaging. The desktop app runs
-directly from installed Python packages; this package provides the
-`airunner-native` command that starts that process (GUI or headless)
-and the crash capture that wraps it.
+This repository owns only the C++ sidecar build -- `cmake`,
+`mingw-w64` and `ninja` cross-compiling a `linux`/`windows` matrix --
+not any Python code. It's split out because that build has a release
+cadence unrelated to the Python application: it only changes when a
+pinned upstream `llama.cpp`/`whisper.cpp` commit bumps, which is rare,
+and needs a different toolchain than the rest of the project.
 
-```mermaid
-flowchart LR
-    Launcher[airunner_native.launcher] --> GUI[airunner: desktop app]
-    Launcher --> Services[airunner-services: daemon entry point]
-    Sidecars[runtime_sidecars/ + scripts/build_runtime_sidecars.sh] --> LlamaCpp[llama.cpp]
-    Sidecars --> WhisperCpp[whisper.cpp]
-```
+An earlier version of this repository also carried the Python launcher
+that starts the desktop app (`airunner_native.launcher`,
+`crash_handler`, `repo_paths`). That code turned out not to belong
+here: it's tightly coupled to `airunner`/`airunner-services` (it
+exists only to bootstrap them) and changes in lockstep with the rest
+of the application, not on an independent cadence -- splitting it
+added cross-repo coordination for no real benefit. It moved back into
+`Capsize-Games/airunner`'s own `native/` directory.
 
-## What this package owns
+## What's here
 
-- The `airunner-native` launcher entry point (`airunner_native.launcher`).
-  The GUI package owns the primary `airunner` command; installing
-  `airunner-native` doesn't shadow or duplicate it.
-- The native-launcher crash handler (`airunner_native.crash_handler`),
-  distinct from `airunner`'s own GUI-specific crash handler -- these
-  are two legitimate implementations for two different processes, not
-  a duplicate.
-- Repo/runtime layout helpers (`airunner_native.repo_paths`).
-- Pinned `llama.cpp` and `whisper.cpp` sidecar build tooling
-  (`runtime_sidecars/`, `scripts/build_runtime_sidecars.sh`), built for
-  a `linux`/`windows` matrix and published as GitHub Release assets by
-  this repository's own `.github/workflows/native-runtime-sidecars.yml`.
+- `runtime_sidecars/runtime_pins.env` -- exact upstream commits for
+  `llama.cpp` and `whisper.cpp`, so bundled runtime binaries don't
+  drift with either project's own `master` branch.
+- `scripts/build_runtime_sidecars.sh` -- builds both binaries for a
+  given target platform.
+- `.github/workflows/native-runtime-sidecars.yml` -- builds the
+  `linux`/`windows` matrix on every release published in this
+  repository and attaches the resulting bundles as release assets.
 
-## Dependencies
-
-This package's only hard install-time dependency is `airunner-common`
--- every import of `airunner` or `airunner-services` in
-`launcher.py` is function-scoped, deferred until the launcher actually
-runs, not required merely to install or import this package. Two
-extras cover how it's actually used together with the rest of the
-application:
-
-```bash
-pip install "airunner-native[gui]"      # desktop role: pulls in airunner
-pip install "airunner-native[services]" # daemon role: pulls in airunner-services
-```
-
-## Runtime sidecars
-
-The pins in `runtime_sidecars/runtime_pins.env` are exact upstream
-commits, so bundled runtime binaries don't drift with `llama.cpp` /
-`whisper.cpp`'s own `master` branches. Build them locally with:
+## Build locally
 
 ```bash
 ./scripts/build_runtime_sidecars.sh --target-platform linux
 ```
 
-CI builds both matrix targets on every release published in this
-repository and attaches the resulting bundles as release assets. The
-source application's own release pipeline downloads a pinned release
-from here rather than building sidecars itself -- see that
+Requires `cmake`, `mingw-w64`, and `ninja`. Output lands in
+`build/runtime-sidecars/<platform>/{bin/,share/airunner/}`.
+
+## Consuming a built bundle
+
+`Capsize-Games/airunner`'s own release pipeline downloads a pinned
+release from here rather than building sidecars itself -- see that
 repository's `.github/native-sidecar-version` for which tag.
 
 ## Provenance
 
-Extracted from `Capsize-Games/airunner` (issue #2196). History for the
-moved files is preserved (`git filter-repo`).
+Extracted from `Capsize-Games/airunner` (issue
+[#2196](https://github.com/Capsize-Games/airunner/issues/2196), part
+of the repository-split tracker
+[#2185](https://github.com/Capsize-Games/airunner/issues/2185)).
+History for the moved files is preserved (`git filter-repo`).
 
 ## Licensing
 
-GPL-3.0-only, matching the application this launches. See
+GPL-3.0-only, matching the application this builds for. See
 [`LICENSE`](LICENSE).
