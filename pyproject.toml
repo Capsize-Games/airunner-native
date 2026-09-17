@@ -1,9 +1,9 @@
 [build-system]
-# native/setup.py no longer imports airunner_common at build time
-# (issue #2038), so an isolated build only needs setuptools+wheel from the
-# index; airunner-common is not fetched into the isolated build environment
-# (all four packages are built and published together since issue #2061).
-# setuptools must stay <82: the pinned torch==2.13.0+cu129 wheel's runtime
-# metadata requires setuptools<82 (issue #2057).
-requires = ["setuptools>=80.9.0,<82", "wheel"]
+# setup.py does not import airunner_common at build time (this package's
+# own metadata is self-contained), so an isolated build only needs
+# setuptools+wheel from the index -- this package has no torch
+# dependency at all, unlike its sibling airunner/airunner-services
+# packages in the source repository, which do pin an upper bound for a
+# torch wheel metadata quirk.
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

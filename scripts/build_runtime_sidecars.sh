@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PINS_FILE="$ROOT_DIR/native/runtime_sidecars/runtime_pins.env"
+PINS_FILE="$ROOT_DIR/runtime_sidecars/runtime_pins.env"
 
 TARGET_PLATFORM="linux"
 OUTPUT_ROOT="$ROOT_DIR/build/runtime-sidecars"
@@ -150,7 +150,7 @@ configure_platform() {
     )
     BINARY_SUFFIX=".exe"
 
-    local compat_header="$ROOT_DIR/native/runtime_sidecars/mingw_thread_power_throttling_compat.h"
+    local compat_header="$ROOT_DIR/runtime_sidecars/mingw_thread_power_throttling_compat.h"
     local probe_source="$WORK_ROOT/$TARGET_PLATFORM/thread_power_throttling_probe.c"
     mkdir -p "$(dirname "$probe_source")"
     cat > "$probe_source" <<'EOF'

@@ -1,43 +1,34 @@
-"""Canonical setup.py for the native package surface.
+"""setup.py for the standalone airunner-native package.
 
-The build metadata below is vendored statically so ``native/`` can be built
-without installing the shared ``airunner_common`` package first (issue #2038).
-``shared/airunner_common/package_metadata.py`` remains the canonical runtime
-source of the same requirement groups; keep the values in this file in sync
-with it when a dependency changes.
+Extracted from Capsize-Games/airunner's native/ directory (issue #2196,
+part of the repo-split tracker #2185). Its release cadence is not
+Python's -- the sidecar build changes when a pinned native runtime
+changes, rarely and for reasons unrelated to application code -- which
+is the whole reason it now lives in its own repository rather than a
+subdirectory of the Qt application's.
 """
 
 from pathlib import Path
 
 from setuptools import find_packages, setup
 
-VERSION = "6.1.3"
+VERSION = "0.1.0"
 
-# The project is GPL-3.0-only (issue #2058): the repo-root LICENSE file, every
-# ``license=`` metadata field and these PyPI classifiers must agree. Mirrored
-# from shared/airunner_common/package_metadata.py (LICENSE_CLASSIFIERS).
+# The project is GPL-3.0-only, matching the source application it
+# launches (Capsize-Games/airunner's own LICENSE and classifiers).
 LICENSE_CLASSIFIERS = [
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
 ]
 
-# Supply-chain hardening (issue #2036). This was a hash-pinned GitHub archive
-# URL, but PyPI rejects any distribution carrying a PEP 440 direct reference
-# ("400 Can't have direct dependency"), so no such package can ever be
-# published. facehuggershield 1.0.0 is on PyPI, so depend on it by version.
-#
-# This does not weaken the original intent. That pin existed so "a tampered or
-# moved tag cannot be substituted" -- but a git tag *can* be moved, which is
-# exactly why it needed a digest. A PyPI release cannot: a version is immutable
-# once uploaded and can only be yanked, never replaced. Installs also verify
-# PyPI's own hashes over TLS. For a fully hash-locked install, pin digests in a
-# requirements file at deploy time, which is where hash-locking belongs --
-# install_requires cannot express it for consumers anyway.
+# Supply-chain hardening (issue #2036 in the source repository). A
+# hash-pinned GitHub archive URL was the original pin, but PyPI rejects
+# any distribution carrying a PEP 440 direct reference ("400 Can't have
+# direct dependency"). facehuggershield 1.0.0 is on PyPI, so depend on
+# it by version instead: a PyPI release is immutable once uploaded and
+# can only be yanked, never replaced, which is a stronger guarantee
+# than a movable git tag ever was.
 FACEHUGGERSHIELD_REQUIREMENT = "facehuggershield==1.0.0"
 
-# Per-package README used as long_description (mirrors services/). The
-# repo-root README is not part of this package's sdist, so a wheel built from
-# the sdist would fail to resolve it (issue #2061); each published package
-# carries its own README.
 README = (Path(__file__).resolve().parent / "README.md").read_text(
     encoding="utf-8"
 )
@@ -45,40 +36,38 @@ README = (Path(__file__).resolve().parent / "README.md").read_text(
 DEVELOPMENT_REQUIREMENTS = [
     "pytest",
     "pytest-timeout",
-    "responses>=0.25.0",
-    "coverage==7.8.0",
-    "black==26.3.1",
-    "pyinstaller==6.12.0",
-    "flake8==7.2.0",
-    "mypy==1.16.0",
-    "autoflake==2.3.1",
-    "pandas>=2.0.0",
-    "pyarrow>=14.0.0",
-    "tqdm>=4.0.0",
 ]
 
-# Issue #2042: the GUI package owns the primary `airunner` console script
-# (setup.py entry_points). The native launcher is exposed as `airunner-native`
-# so installing airunner-native no longer shadows/duplicates the GUI command.
 NATIVE_CONSOLE_SCRIPTS = [
     "airunner-native=airunner_native.launcher:main",
 ]
 
+# airunner-common only: the launcher's app-specific imports (airunner,
+# airunner_services) are all function-scoped, deferred until the
+# launcher actually runs, not hard install-time dependencies -- see
+# the "services"/"daemon" and "gui"/"desktop" extras below for the two
+# ways this package actually gets used together with the rest of the
+# application.
 NATIVE_BASE_REQUIREMENTS = [
-    f"airunner-common=={VERSION}",
-    f"airunner-services=={VERSION}",
+    "airunner-common~=6.1",
     FACEHUGGERSHIELD_REQUIREMENT,
 ]
 
 
 def build_native_extras_require() -> dict[str, list[str]]:
     """Return optional extras for the native package surface."""
-    gui_requirements = [f"airunner=={VERSION}"]
     return {
         "development": DEVELOPMENT_REQUIREMENTS,
         "dev": DEVELOPMENT_REQUIREMENTS,
-        "gui": gui_requirements,
-        "desktop": gui_requirements,
+        # A headless/daemon-role install: this launcher plus the
+        # services package, no GUI.
+        "services": ["airunner-services~=6.1"],
+        "daemon": ["airunner-services~=6.1"],
+        # A GUI-client-role install. airunner itself already depends
+        # on airunner-services, so this extra alone is enough for a
+        # full desktop install.
+        "gui": ["airunner~=6.1"],
+        "desktop": ["airunner~=6.1"],
     }
 
 
@@ -88,13 +77,13 @@ def build_native_setup_kwargs(*, package_source_dir: str) -> dict[str, object]:
         "name": "airunner-native",
         "version": VERSION,
         "author": "Capsize LLC",
-        "description": "AIRunner native launcher and bundle tooling",
+        "description": "AIRunner native launcher and runtime sidecar tooling",
         "long_description": README,
         "long_description_content_type": "text/markdown",
         "license": "GPL-3.0-only",
         "classifiers": LICENSE_CLASSIFIERS,
         "author_email": "contact@capsizegames.com",
-        "url": "https://github.com/Capsize-Games/airunner",
+        "url": "https://github.com/Capsize-Games/airunner-native",
         "package_dir": {"": package_source_dir},
         "packages": find_packages(package_source_dir),
         "python_requires": ">=3.13.3",

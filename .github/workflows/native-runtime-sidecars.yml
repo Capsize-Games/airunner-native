@@ -11,6 +11,11 @@ permissions:
 jobs:
   build-sidecars:
     runs-on: ubuntu-latest
+    # write is only needed to attach release assets in the last step
+    # below (and only fires on an actual release event); read would be
+    # enough for everything else this job does.
+    permissions:
+      contents: write
 
     strategy:
       fail-fast: false
@@ -34,8 +39,25 @@ jobs:
             --clean \
             --target-platform ${{ matrix.target-platform }}
 
+      - name: Package sidecar bundle
+        run: |
+          tar -C "build/runtime-sidecars/${{ matrix.target-platform }}" \
+            -czf "runtime-sidecars-${{ matrix.target-platform }}.tar.gz" .
+
       - name: Upload sidecar bundle artifact
         uses: actions/upload-artifact@v4
         with:
           name: runtime-sidecars-${{ matrix.target-platform }}
-          path: build/runtime-sidecars/${{ matrix.target-platform }}
+          path: runtime-sidecars-${{ matrix.target-platform }}.tar.gz
+
+      # A workflow-run artifact (the upload step above) expires after 90
+      # days and isn't a stable download URL, so it can't be what the
+      # source application's own release pipeline consumes. A published
+      # release's assets are durable and individually addressable by
+      # tag, which is what a "fetch the pinned sidecar bundle" step in
+      # another repository's workflow needs.
+      - name: Attach bundle to the release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: runtime-sidecars-${{ matrix.target-platform }}.tar.gz
