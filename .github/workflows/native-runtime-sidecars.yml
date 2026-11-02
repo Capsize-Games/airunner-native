@@ -26,7 +26,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
 
       - name: Install native build dependencies
         run: |
@@ -39,25 +44,35 @@ jobs:
             --clean \
             --target-platform ${{ matrix.target-platform }}
 
-      - name: Package sidecar bundle
-        run: |
-          tar -C "build/runtime-sidecars/${{ matrix.target-platform }}" \
-            -czf "runtime-sidecars-${{ matrix.target-platform }}.tar.gz" .
+      - name: Package sidecar bundle and provenance
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: ./scripts/package_runtime_sidecars.sh "${{ matrix.target-platform }}"
 
       - name: Upload sidecar bundle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-sidecars-${{ matrix.target-platform }}
-          path: runtime-sidecars-${{ matrix.target-platform }}.tar.gz
+          if-no-files-found: error
+          path: |
+            runtime-sidecars-${{ matrix.target-platform }}.tar.gz
+            runtime-sidecars-${{ matrix.target-platform }}.tar.gz.sha256
+            runtime-sidecars-${{ matrix.target-platform }}-provenance.txt
 
-      # A workflow-run artifact (the upload step above) expires after 90
-      # days and isn't a stable download URL, so it can't be what the
-      # source application's own release pipeline consumes. A published
-      # release's assets are durable and individually addressable by
-      # tag, which is what a "fetch the pinned sidecar bundle" step in
-      # another repository's workflow needs.
-      - name: Attach bundle to the release
+      # The upload helper verifies the exact local and remote annotated tag
+      # objects, peeled source SHA, checkout SHA, and every asset name before it
+      # performs one no-clobber upload operation.
+      - name: Preflight and attach release assets
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: runtime-sidecars-${{ matrix.target-platform }}.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          ./scripts/upload_native_release_assets.sh \
+            "$GITHUB_REF_NAME" \
+            "runtime-sidecars-${{ matrix.target-platform }}.tar.gz" \
+            "runtime-sidecars-${{ matrix.target-platform }}.tar.gz.sha256" \
+            "runtime-sidecars-${{ matrix.target-platform }}-provenance.txt"
