@@ -133,16 +133,23 @@ class SidecarSafetyTests(unittest.TestCase):
             tools = root / "tools"
             tools.mkdir()
             work = root / "caller-work"
+            gomp = root / "libgomp.a"
+            gomp.write_bytes(b"fixture archive")
             for name in (
                 "x86_64-w64-mingw32-g++-posix",
                 "x86_64-w64-mingw32-gcc-posix",
             ):
                 tool = tools / name
-                tool.write_text("#!/bin/sh\ncat >/dev/null\nexit 0\n", encoding="utf-8")
+                tool.write_text(
+                    "#!/bin/sh\n"
+                    "if [ \"$1\" = -print-file-name=libgomp.a ]; then "
+                    "printf '%s\\n' \"$TEST_GOMP\"; fi\n",
+                    encoding="utf-8",
+                )
                 tool.chmod(0o755)
             result = self.run_shell(
                 f'TARGET_PLATFORM=windows; WORK_ROOT="{work}"; configure_platform',
-                env={"PATH": f"{tools}:{os.environ['PATH']}"},
+                env={"PATH": f"{tools}:{os.environ['PATH']}", "TEST_GOMP": str(gomp)},
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(work.exists())
@@ -151,21 +158,29 @@ class SidecarSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             tools = Path(temporary) / "tools"
             tools.mkdir()
+            gomp = Path(temporary) / "libgomp.a"
+            gomp.write_bytes(b"fixture archive")
             for name in (
                 "x86_64-w64-mingw32-g++-posix",
                 "x86_64-w64-mingw32-gcc-posix",
             ):
                 tool = tools / name
-                tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                tool.write_text(
+                    "#!/bin/sh\n"
+                    "if [ \"$1\" = -print-file-name=libgomp.a ]; then "
+                    "printf '%s\\n' \"$TEST_GOMP\"; fi\n",
+                    encoding="utf-8",
+                )
                 tool.chmod(0o755)
             result = self.run_shell(
                 'TARGET_PLATFORM=windows; configure_platform; '
-                'printf "%s\\n" "${CMAKE_PLATFORM_ARGS[@]}"; '
+                'printf "%s\\n" "${CMAKE_PLATFORM_ARGS[@]}" "${CMAKE_OPENMP_ARGS[@]}"; '
                 'DRY_RUN=1; CMAKE_CUDA_ARGS=(); configure_build source build',
-                env={"PATH": f"{tools}:{os.environ['PATH']}"},
+                env={"PATH": f"{tools}:{os.environ['PATH']}", "TEST_GOMP": str(gomp)},
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("-DCMAKE_EXE_LINKER_FLAGS=-static", result.stdout)
+            self.assertIn(f"-DOpenMP_gomp_LIBRARY={gomp}", result.stdout)
 
     def test_windows_runtime_notice_inputs_are_copied_into_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

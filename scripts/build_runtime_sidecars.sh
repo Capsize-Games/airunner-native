@@ -18,6 +18,7 @@ CUDA_ARCHITECTURES="${AIRUNNER_SIDECAR_CUDA_ARCHITECTURES:-}"
 
 CMAKE_PLATFORM_ARGS=()
 CMAKE_CUDA_ARGS=()
+CMAKE_OPENMP_ARGS=()
 BINARY_SUFFIX=""
 
 usage() {
@@ -193,6 +194,7 @@ assert_owned_target() {
 configure_platform() {
     CMAKE_PLATFORM_ARGS=()
     CMAKE_CUDA_ARGS=()
+    CMAKE_OPENMP_ARGS=()
     BINARY_SUFFIX=""
     C_COMPILER="${CC:-cc}"
     CXX_COMPILER="${CXX:-c++}"
@@ -232,6 +234,18 @@ configure_platform() {
     fi
     CXX_COMPILER="$cxx"
     C_COMPILER="$cc"
+
+    local gomp_archive
+    gomp_archive="$("$CXX_COMPILER" -print-file-name=libgomp.a)"
+    if [[ ! -f "$gomp_archive" || -L "$gomp_archive" ]]; then
+        echo "A regular static MinGW libgomp.a is required for Windows sidecars" >&2
+        return 1
+    fi
+    CMAKE_OPENMP_ARGS=(
+        -DOpenMP_C_LIB_NAMES=gomp
+        -DOpenMP_CXX_LIB_NAMES=gomp
+        -DOpenMP_gomp_LIBRARY="$gomp_archive"
+    )
 
     CMAKE_PLATFORM_ARGS=(
         -DCMAKE_SYSTEM_NAME=Windows
@@ -363,6 +377,7 @@ configure_build() {
         -DGGML_CUDA_CUB_3DOT2=OFF \
         "${CMAKE_PLATFORM_ARGS[@]}" \
         "${CMAKE_CUDA_ARGS[@]}" \
+        "${CMAKE_OPENMP_ARGS[@]}" \
         "$@"
 }
 
@@ -583,8 +598,7 @@ build_llama_sidecar() {
         -DLLAMA_BUILD_SERVER=ON \
         -DLLAMA_BUILD_TESTS=OFF \
         -DLLAMA_BUILD_TOOLS=ON \
-        -DLLAMA_BUILD_WEBUI=OFF \
-        -DGGML_OPENMP=OFF
+        -DLLAMA_BUILD_WEBUI=OFF
     build_target "$build_path" "llama-server"
     copy_binary "$build_path" "llama-server"
 }
@@ -607,8 +621,7 @@ build_whisper_sidecar() {
         "$build_path" \
         -DWHISPER_BUILD_SERVER=ON \
         -DWHISPER_BUILD_TESTS=OFF \
-        -DWHISPER_SDL2=OFF \
-        -DWHISPER_OPENMP=OFF
+        -DWHISPER_SDL2=OFF
     build_target "$build_path" "whisper-server"
     copy_binary "$build_path" "whisper-server"
     remove_whisper_generated_source_file
