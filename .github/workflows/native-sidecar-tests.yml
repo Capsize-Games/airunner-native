@@ -19,7 +19,7 @@ jobs:
 
       - name: Check shell syntax
         run: |
-          for script in scripts/build_runtime_sidecars.sh scripts/package_runtime_sidecars.sh scripts/upload_native_release_assets.sh; do
+          for script in scripts/build_runtime_sidecars.sh scripts/check_windows_runtime_imports.sh scripts/package_runtime_sidecars.sh scripts/upload_native_release_assets.sh; do
             bash -n "$script"
           done
 

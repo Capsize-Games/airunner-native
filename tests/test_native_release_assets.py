@@ -179,6 +179,31 @@ else:
         self.assertIn("bash -n \"$script\"", test_workflow)
         self.assertIn("python3 -m unittest discover -s tests -v", test_workflow)
 
+    def test_release_promotion_requires_native_os_archive_smokes(self) -> None:
+        workflow = (REPO / ".github/workflows/native-runtime-sidecars.yml").read_text(encoding="utf-8")
+        smoke_start = workflow.index("  smoke-sidecars:")
+        promote_start = workflow.index("  promote-release:")
+        verify_start = workflow.index("  verify-published-release:")
+        smoke = workflow[smoke_start:promote_start]
+        promote = workflow[promote_start:verify_start]
+        build = workflow[workflow.index("  build-sidecars:"):smoke_start]
+
+        self.assertIn("needs: [build-sidecars]", smoke)
+        self.assertIn("'windows-2022'", smoke)
+        self.assertIn("'ubuntu-24.04'", smoke)
+        self.assertIn("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", smoke)
+        self.assertIn("sha256sum --check --strict", smoke)
+        self.assertIn("Get-FileHash -Algorithm SHA256", smoke)
+        self.assertIn("llama-server\" --version", smoke)
+        self.assertIn("llama-server\" --help", smoke)
+        self.assertIn("whisper-server\" --help", smoke)
+        self.assertIn("needs: [smoke-sidecars]", promote)
+        self.assertIn("scripts/check_windows_runtime_imports.sh", build)
+        self.assertLess(build.index("Build pinned sidecar bundle"), build.index("Reject dynamic MinGW runtime imports"))
+        self.assertLess(build.index("Reject dynamic MinGW runtime imports"), build.index("Package sidecar bundle and provenance"))
+        self.assertLess(workflow.index("  build-sidecars:"), workflow.index("  smoke-sidecars:"))
+        self.assertLess(workflow.index("  smoke-sidecars:"), workflow.index("  promote-release:"))
+
     def test_package_is_deterministic_and_records_source_and_toolchain(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

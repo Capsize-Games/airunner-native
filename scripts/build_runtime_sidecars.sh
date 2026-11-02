@@ -237,6 +237,7 @@ configure_platform() {
         -DCMAKE_SYSTEM_NAME=Windows
         -DCMAKE_C_COMPILER="$cc"
         -DCMAKE_CXX_COMPILER="$cxx"
+        -DCMAKE_EXE_LINKER_FLAGS=-static
     )
     BINARY_SUFFIX=".exe"
 
@@ -414,6 +415,61 @@ copy_upstream_licenses() {
     done
 }
 
+copy_windows_runtime_licenses() {
+    [[ "$TARGET_PLATFORM" == "windows" ]] || return 0
+
+    local source destination license
+    if [[ "$DRY_RUN" != "1" ]]; then
+        verify_windows_runtime_package_versions
+    fi
+    for license in \
+        GPL-3.txt \
+        mingw-gcc-runtime-copyright.txt \
+        mingw-runtime-source.txt \
+        winpthreads-COPYING.txt; do
+        source="$ROOT_DIR/runtime_sidecars/licenses/$license"
+        destination="$BUNDLE_SHARE_DIR/licenses/$license"
+        if [[ "$DRY_RUN" == "1" ]]; then
+            echo "+ copy $source $destination"
+            continue
+        fi
+        if [[ ! -f "$source" || -L "$source" ]]; then
+            echo "Expected regular MinGW runtime notice was not found: $source" >&2
+            return 1
+        fi
+        if [[ -L "${destination%/*}" ]]; then
+            echo "Refusing symlink license output directory: ${destination%/*}" >&2
+            return 1
+        fi
+        mkdir -p "${destination%/*}"
+        cp -- "$source" "$destination"
+    done
+}
+
+verify_windows_runtime_package_versions() {
+    local package expected actual
+    local -a packages=(
+        "gcc-mingw-w64-x86-64-posix-runtime=13.2.0-6ubuntu1+26.1"
+        "gcc-mingw-w64-x86-64-posix=13.2.0-6ubuntu1+26.1"
+        "g++-mingw-w64-x86-64-posix=13.2.0-6ubuntu1+26.1"
+        "mingw-w64-x86-64-dev=11.0.1-3build1"
+        "mingw-w64-common=11.0.1-3build1"
+    )
+    if ! command -v dpkg-query >/dev/null 2>&1; then
+        echo "dpkg-query is required to verify the reviewed Windows runtime packages" >&2
+        return 1
+    fi
+    for entry in "${packages[@]}"; do
+        package="${entry%%=*}"
+        expected="${entry#*=}"
+        actual="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null || true)"
+        if [[ "$actual" != "$expected" ]]; then
+            echo "Windows runtime notice input mismatch for $package: expected $expected, got ${actual:-not-installed}" >&2
+            return 1
+        fi
+    done
+}
+
 remove_whisper_generated_source_file() {
     local generated="$SOURCE_DIR/whisper.cpp/bindings/javascript/package.json"
     if [[ -e "$generated" || -L "$generated" ]]; then
@@ -479,6 +535,12 @@ EOF
         manifest_set AIRUNNER_CUDA_ENABLED "$ENABLE_CUDA"
         manifest_set AIRUNNER_CUDA_ARCHITECTURES "$cuda_arch"
         manifest_set AIRUNNER_CPU_BASELINE "GGML_NATIVE=OFF"
+        if [[ "$TARGET_PLATFORM" == "windows" ]]; then
+            manifest_set AIRUNNER_WINDOWS_RUNTIME_LINKAGE "static"
+            manifest_set AIRUNNER_MINGW_GCC_RUNTIME_PACKAGE_VERSION "13.2.0-6ubuntu1+26.1"
+            manifest_set AIRUNNER_MINGW_W64_PACKAGE_VERSION "11.0.1-3build1"
+            manifest_set AIRUNNER_WINDOWS_RUNTIME_NOTICES "GPL-3.txt,mingw-gcc-runtime-copyright.txt,mingw-runtime-source.txt,winpthreads-COPYING.txt"
+        fi
         manifest_set AIRUNNER_LLAMA_SERVER_SHA256 "$llama_hash"
         manifest_set AIRUNNER_WHISPER_SERVER_SHA256 "$whisper_hash"
     } >> "$manifest_path"
@@ -564,6 +626,7 @@ main() {
     build_llama_sidecar
     build_whisper_sidecar
     copy_upstream_licenses
+    copy_windows_runtime_licenses
     write_manifest
 
     echo
