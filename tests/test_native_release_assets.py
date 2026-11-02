@@ -46,8 +46,11 @@ if args[0] == "api":
         if "--jq" in args: print(value["object"]["sha"] + "\\tcommit")
         else: print(json.dumps(value))
     elif "/releases/tags/" in route:
-        if state["release"] is None: raise SystemExit(1)
+        if state["release"] is None or state["release"]["draft"]: raise SystemExit(1)
         print(json.dumps(state["release"]))
+    elif route.endswith("/releases?per_page=100"):
+        log("LIST RELEASES")
+        print(json.dumps([] if state["release"] is None else [state["release"]]))
     elif route.endswith("/assets?per_page=100"):
         print(json.dumps(state["assets"]))
     elif route.endswith("/releases/71") and method == "PATCH":
@@ -264,6 +267,8 @@ else:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             uploaded = log.read_text(encoding="utf-8")
             self.assertLess(uploaded.index("CREATE v0.2.0"), uploaded.index("UPLOAD v0.2.0"))
+            self.assertLess(uploaded.index("CREATE v0.2.0"), uploaded.rindex("LIST RELEASES"))
+            self.assertLess(uploaded.rindex("LIST RELEASES"), uploaded.index("UPLOAD v0.2.0"))
             self.assertLess(uploaded.index("UPLOAD v0.2.0"), uploaded.index("PATCH repos/"))
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertFalse(state["release"]["draft"])

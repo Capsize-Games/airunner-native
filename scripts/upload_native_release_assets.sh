@@ -49,7 +49,19 @@ if [[ "$remote_target_type" != commit || "$remote_source" != "$GITHUB_SHA" ]]; t
     echo "Remote annotated tag does not peel to GITHUB_SHA" >&2; exit 1
 fi
 release_route="repos/$GITHUB_REPOSITORY/releases/tags/$tag"
-fetch_release() { gh api "$release_route" -H "X-GitHub-Api-Version: $API_VERSION"; }
+fetch_release() {
+    if gh api "$release_route" -H "X-GitHub-Api-Version: $API_VERSION" 2>/dev/null; then
+        return 0
+    fi
+    gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+        -H "X-GitHub-Api-Version: $API_VERSION" |
+        jq -ce --arg tag "$tag" '
+            [.[] | select(.tag_name == $tag)] |
+            if length == 1 then .[0]
+            else error("expected exactly one release record for tag " + $tag)
+            end
+        '
+}
 
 if [[ "$mode" == check-tag ]]; then
     echo "verified annotated source tag $tag"; exit 0
