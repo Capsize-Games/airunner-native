@@ -583,7 +583,8 @@ build_llama_sidecar() {
         -DLLAMA_BUILD_SERVER=ON \
         -DLLAMA_BUILD_TESTS=OFF \
         -DLLAMA_BUILD_TOOLS=ON \
-        -DLLAMA_BUILD_WEBUI=OFF
+        -DLLAMA_BUILD_WEBUI=OFF \
+        -DGGML_OPENMP=OFF
     build_target "$build_path" "llama-server"
     copy_binary "$build_path" "llama-server"
 }
@@ -606,7 +607,8 @@ build_whisper_sidecar() {
         "$build_path" \
         -DWHISPER_BUILD_SERVER=ON \
         -DWHISPER_BUILD_TESTS=OFF \
-        -DWHISPER_SDL2=OFF
+        -DWHISPER_SDL2=OFF \
+        -DWHISPER_OPENMP=OFF
     build_target "$build_path" "whisper-server"
     copy_binary "$build_path" "whisper-server"
     remove_whisper_generated_source_file
