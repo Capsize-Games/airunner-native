@@ -50,17 +50,29 @@ if [[ "$remote_target_type" != commit || "$remote_source" != "$GITHUB_SHA" ]]; t
 fi
 release_route="repos/$GITHUB_REPOSITORY/releases/tags/$tag"
 fetch_release() {
-    if gh api "$release_route" -H "X-GitHub-Api-Version: $API_VERSION" 2>/dev/null; then
-        return 0
-    fi
-    gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-        -H "X-GitHub-Api-Version: $API_VERSION" |
-        jq -ce --arg tag "$tag" '
-            [.[] | select(.tag_name == $tag)] |
-            if length == 1 then .[0]
-            else error("expected exactly one release record for tag " + $tag)
-            end
-        '
+    local retry=${1:-no} attempt release_json max_attempts=1
+    [[ "$retry" == yes ]] && max_attempts=5
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        if release_json=$(gh api "$release_route" -H "X-GitHub-Api-Version: $API_VERSION" 2>/dev/null); then
+            printf '%s\n' "$release_json"
+            return 0
+        fi
+        if release_json=$(
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                -H "X-GitHub-Api-Version: $API_VERSION" 2>/dev/null |
+                jq -ce --arg tag "$tag" '
+                    [.[] | select(.tag_name == $tag)] |
+                    if length == 1 then .[0]
+                    else empty
+                    end
+                ' 2>/dev/null
+        ); then
+            printf '%s\n' "$release_json"
+            return 0
+        fi
+        [[ "$attempt" -eq "$max_attempts" ]] || sleep 1
+    done
+    return 1
 }
 
 if [[ "$mode" == check-tag ]]; then
@@ -124,8 +136,20 @@ if release_json=$(fetch_release 2>/dev/null); then
         echo "Existing release is not the expected mutable draft" >&2; exit 1;
     }
 else
-    gh release create "$tag" --draft --verify-tag --title "$tag" --notes "" --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
-    release_json=$(fetch_release)
+    if ! release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+        --method POST \
+        -F "tag_name=$tag" \
+        -F "target_commitish=$GITHUB_SHA" \
+        -F "name=$tag" \
+        -F draft=true \
+        -F prerelease=false \
+        -f body= \
+        -H "X-GitHub-Api-Version: $API_VERSION"); then
+        release_json=$(fetch_release yes) || {
+            echo "Release creation failed and no matching draft became visible: $tag" >&2
+            exit 1
+        }
+    fi
     release_id=$(jq -er --arg tag "$tag" 'if .tag_name == $tag and .draft == true and .prerelease == false then .id else error("bad created draft") end' <<< "$release_json")
 fi
 
@@ -169,7 +193,7 @@ published_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --method
 jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' <<< "$published_json" >/dev/null || {
     echo "GitHub did not publish an immutable stable release" >&2; exit 1;
 }
-final_json=$(fetch_release)
+final_json=$(fetch_release yes)
 jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' <<< "$final_json" >/dev/null || {
     echo "Published immutable release could not be confirmed" >&2; exit 1;
 }

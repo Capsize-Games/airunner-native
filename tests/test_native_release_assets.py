@@ -50,13 +50,27 @@ if args[0] == "api":
         print(json.dumps(state["release"]))
     elif route.endswith("/releases?per_page=100"):
         log("LIST RELEASES")
-        print(json.dumps([] if state["release"] is None else [state["release"]]))
+        release = state["release"]
+        if release is None:
+            print("[]")
+        elif release["draft"] and state.get("draft_list_lag_reads", 0) > 0:
+            state["draft_list_lag_reads"] -= 1
+            save(); print("[]")
+        else:
+            print(json.dumps([release]))
     elif route.endswith("/assets?per_page=100"):
         print(json.dumps(state["assets"]))
     elif route.endswith("/releases/71") and method == "PATCH":
         state["release"]["draft"] = False
         state["release"]["immutable"] = os.environ.get("FAKE_PUBLISH_IMMUTABLE", "true") == "true"
         save(); log("PATCH " + route); print(json.dumps(state["release"]))
+    elif route.endswith("/releases") and method == "POST":
+        if state["release"] is not None: raise SystemExit("release already exists")
+        tag = next(item.split("=", 1)[1] for item in args if item.startswith("tag_name="))
+        state["release"] = {"id": 71, "tag_name": tag, "draft": True,
+                            "prerelease": False, "immutable": False}
+        state["draft_list_lag_reads"] = 1
+        save(); log("CREATE " + tag); print(json.dumps(state["release"]))
     else:
         raise SystemExit("unexpected gh api route: " + route)
 elif args[0] == "release" and args[1] == "create":
@@ -267,8 +281,8 @@ else:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             uploaded = log.read_text(encoding="utf-8")
             self.assertLess(uploaded.index("CREATE v0.2.0"), uploaded.index("UPLOAD v0.2.0"))
-            self.assertLess(uploaded.index("CREATE v0.2.0"), uploaded.rindex("LIST RELEASES"))
-            self.assertLess(uploaded.rindex("LIST RELEASES"), uploaded.index("UPLOAD v0.2.0"))
+            self.assertEqual(uploaded.count("LIST RELEASES"), 1)
+            self.assertLess(uploaded.index("LIST RELEASES"), uploaded.index("CREATE v0.2.0"))
             self.assertLess(uploaded.index("UPLOAD v0.2.0"), uploaded.index("PATCH repos/"))
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertFalse(state["release"]["draft"])
