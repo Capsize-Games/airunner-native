@@ -8,6 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CandidateWorkflowTests(unittest.TestCase):
+    def test_job_environment_uses_only_contexts_available_before_runner_start(self):
+        workflow = (ROOT / ".github/workflows/native-cuda-sm120-candidate.yml").read_text(encoding="utf-8")
+        job_environment = workflow.split("    env:\n", 1)[1].split("\n\n    steps:", 1)[0]
+        self.assertNotIn("${{ runner.temp }}", job_environment)
+        self.assertIn('"$RUNNER_TEMP/$SOURCE_DIR"', workflow)
+        self.assertIn('"$RUNNER_TEMP/$INPUT_DIR"', workflow)
+
     def test_workflow_is_manual_and_artifact_only(self):
         workflow = (ROOT / ".github/workflows/native-cuda-sm120-candidate.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", workflow)

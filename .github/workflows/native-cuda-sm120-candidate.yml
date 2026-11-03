@@ -19,12 +19,12 @@ jobs:
     env:
       CUDA_IMAGE: nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:16656a1ef115bca9e1f820c6349876f1486d2b3c9a0e615773799fe402960dc5
       SOURCE_COMMIT: 7acb4e8cd2ce21f457d1298e75fad729520d263c
-      SOURCE_DIR: ${{ runner.temp }}/llama-cpp-reviewed-source
-      INPUT_DIR: ${{ runner.temp }}/cuda-sm120-inputs
-      BUILD_DIR: ${{ runner.temp }}/cuda-sm120-build
-      WORK_DIR: ${{ runner.temp }}/cuda-sm120-work
-      PACKAGE_DIR: ${{ runner.temp }}/cuda-sm120-package
-      ARCHIVE_DIR: ${{ runner.temp }}/cuda-sm120-archive
+      SOURCE_DIR: llama-cpp-reviewed-source
+      INPUT_DIR: cuda-sm120-inputs
+      BUILD_DIR: cuda-sm120-build
+      WORK_DIR: cuda-sm120-work
+      PACKAGE_DIR: cuda-sm120-package
+      ARCHIVE_DIR: cuda-sm120-archive
 
     steps:
       - name: Checkout candidate recipe
@@ -40,21 +40,21 @@ jobs:
           export GIT_CONFIG_NOSYSTEM=1
           export GIT_CONFIG_GLOBAL=/dev/null
           git -c core.hooksPath=/dev/null -c init.templateDir=/dev/null \
-            clone --no-checkout --no-tags https://github.com/ggml-org/llama.cpp.git "$SOURCE_DIR"
-          git -C "$SOURCE_DIR" -c core.hooksPath=/dev/null -c protocol.file.allow=never \
+            clone --no-checkout --no-tags https://github.com/ggml-org/llama.cpp.git "$RUNNER_TEMP/$SOURCE_DIR"
+          git -C "$RUNNER_TEMP/$SOURCE_DIR" -c core.hooksPath=/dev/null -c protocol.file.allow=never \
             fetch --no-tags origin "$SOURCE_COMMIT"
-          git -C "$SOURCE_DIR" -c core.hooksPath=/dev/null checkout --detach "$SOURCE_COMMIT"
-          test "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$SOURCE_COMMIT"
-          test "$(git -C "$SOURCE_DIR" rev-parse 'HEAD^{tree}')" = 5a77024ea13397365f3be1610bee5573b0c42f1f
-          test -z "$(git -C "$SOURCE_DIR" status --porcelain --untracked-files=all)"
-          test "$(git -C "$SOURCE_DIR" rev-list --count HEAD)" = 9523
-          sha256sum "$SOURCE_DIR/LICENSE"
+          git -C "$RUNNER_TEMP/$SOURCE_DIR" -c core.hooksPath=/dev/null checkout --detach "$SOURCE_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/$SOURCE_DIR" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/$SOURCE_DIR" rev-parse 'HEAD^{tree}')" = 5a77024ea13397365f3be1610bee5573b0c42f1f
+          test -z "$(git -C "$RUNNER_TEMP/$SOURCE_DIR" status --porcelain --untracked-files=all)"
+          test "$(git -C "$RUNNER_TEMP/$SOURCE_DIR" rev-list --count HEAD)" = 9523
+          sha256sum "$RUNNER_TEMP/$SOURCE_DIR/LICENSE"
 
       - name: Fetch hash-locked public build inputs
         timeout-minutes: 45
         run: |
           set -euo pipefail
-          python3 scripts/fetch_cuda_sm120_inputs.py --output-dir "$INPUT_DIR" | tee "$RUNNER_TEMP/cuda-sm120-input-hashes.txt"
+          python3 scripts/fetch_cuda_sm120_inputs.py --output-dir "$RUNNER_TEMP/$INPUT_DIR" | tee "$RUNNER_TEMP/cuda-sm120-input-hashes.txt"
           sha256sum --check "$RUNNER_TEMP/cuda-sm120-input-hashes.txt"
 
       - name: Pull the pinned CUDA build image
@@ -68,10 +68,10 @@ jobs:
           set -euo pipefail
           timeout --signal=TERM --kill-after=60s 120m \
             ./scripts/build_cuda_sm120_candidate.sh \
-              --source "$SOURCE_DIR" \
-              --cmake-archive "$INPUT_DIR/cmake-3.31.6-linux-x86_64.tar.gz" \
-              --output-root "$BUILD_DIR" \
-              --work-root "$WORK_DIR" \
+              --source "$RUNNER_TEMP/$SOURCE_DIR" \
+              --cmake-archive "$RUNNER_TEMP/$INPUT_DIR/cmake-3.31.6-linux-x86_64.tar.gz" \
+              --output-root "$RUNNER_TEMP/$BUILD_DIR" \
+              --work-root "$RUNNER_TEMP/$WORK_DIR" \
               --jobs 2
 
       - name: Verify pinned Ubuntu runtime notice and package list
@@ -98,20 +98,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$ARCHIVE_DIR"
+          mkdir -p "$RUNNER_TEMP/$ARCHIVE_DIR"
           python3 scripts/package_cuda_sm120_candidate.py \
-            --build-output "$BUILD_DIR" \
-            --build-receipt "$BUILD_DIR/build-container-receipt.json" \
-            --runtime-wheel "$INPUT_DIR/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" \
-            --cublas-wheel "$INPUT_DIR/nvidia_cublas_cu12-12.9.1.4-py3-none-manylinux_2_27_x86_64.whl" \
-            --nvrtc-wheel "$INPUT_DIR/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl" \
+            --build-output "$RUNNER_TEMP/$BUILD_DIR" \
+            --build-receipt "$RUNNER_TEMP/$BUILD_DIR/build-container-receipt.json" \
+            --runtime-wheel "$RUNNER_TEMP/$INPUT_DIR/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" \
+            --cublas-wheel "$RUNNER_TEMP/$INPUT_DIR/nvidia_cublas_cu12-12.9.1.4-py3-none-manylinux_2_27_x86_64.whl" \
+            --nvrtc-wheel "$RUNNER_TEMP/$INPUT_DIR/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl" \
             --gcc-notice runtime_sidecars/licenses/GCC-libgomp-copyright.txt \
             --platform-packages runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt \
-            --output-dir "$PACKAGE_DIR" \
-            --archive "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz"
-          sha256sum "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz" \
-            > "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz.sha256"
-          sha256sum --check "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz.sha256"
+            --output-dir "$RUNNER_TEMP/$PACKAGE_DIR" \
+            --archive "$RUNNER_TEMP/$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz"
+          sha256sum "$RUNNER_TEMP/$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz" \
+            > "$RUNNER_TEMP/$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz.sha256"
+          sha256sum --check "$RUNNER_TEMP/$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz.sha256"
 
       - name: Upload non-release candidate artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
