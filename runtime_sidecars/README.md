@@ -76,9 +76,11 @@ binaries. The bundle also includes the upstream MIT license texts in
 `share/airunner/licenses/`. It describes the build that produced those files;
 it does not authenticate a downloaded release archive.
 
-The generated manifest points AIRunner at the bundled sidecar binaries
-using paths relative to `share/airunner/runtime_manifest.env` and matches the
-packaged bundle layout that installs AIRunner into `app/site-packages/`.
+Manifest version 2 records standalone native runtime facts. Binary paths are
+relative to `share/airunner/runtime_manifest.env`, as declared by
+`AIRUNNER_NATIVE_PATH_BASE=manifest-directory`. The archive contains no Python
+interpreter or application entry point. The earlier manifest's Python and
+application path fields are omitted; existing published archives are unchanged.
 
 Each build also records `share/airunner/producer-recipe.json`. The build and
 release packager verify that receipt against the committed source tree and the

@@ -5,12 +5,11 @@ tooling for
 [Capsize-Games/airunner](https://github.com/Capsize-Games/airunner)
 (AI Runner).
 
-This repository owns only the C++ sidecar build -- `cmake`,
-`mingw-w64` and `ninja` cross-compiling a `linux`/`windows` matrix --
-not any Python code. It's split out because that build has a release
-cadence unrelated to the Python application: it only changes when a
-pinned upstream `llama.cpp`/`whisper.cpp` commit bumps, which is rare,
-and needs a different toolchain than the rest of the project.
+This repository builds and packages the native sidecars with CMake and Ninja,
+using MinGW for Windows cross-compilation. Its scripts and tests include Python
+code, but its runtime archives do not include the Python application or an
+interpreter. Sidecar source pins, patches and toolchains are released separately
+from the consuming application.
 
 An earlier version of this repository also carried the Python launcher
 that starts the desktop app (`airunner_native.launcher`,
@@ -29,8 +28,10 @@ added cross-repo coordination for no real benefit. It moved back into
 - `scripts/build_runtime_sidecars.sh` -- builds both binaries for a
   given target platform.
 - `.github/workflows/native-runtime-sidecars.yml` -- builds the
-  `linux`/`windows` matrix on every release published in this
-  repository and attaches the resulting bundles as release assets.
+  `linux`/`windows` matrix on workflow dispatch and checks both archives on
+  their native operating systems. Release promotion builds from an annotated
+  tag, attaches the verified assets to a draft, and publishes it as immutable.
+  Published-release events verify the existing release.
 - `scripts/build_cuda_sm120_candidate.sh` and
   `scripts/package_cuda_sm120_candidate.py` -- build and hash-lock a separate
   Linux x86_64 CUDA SM 120a candidate. The package inputs are listed in
