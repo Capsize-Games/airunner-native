@@ -79,11 +79,11 @@ jobs:
         run: |
           set -euo pipefail
           image_container="$(docker create --pull=never --runtime=runc --platform linux/amd64 --network=none \
-            --cpus=1 --memory=1g --read-only --entrypoint /bin/bash "$CUDA_IMAGE" -ceu \
-            'dpkg-query -W -f="${binary:Package}\t${Version}\n" libc6 libgcc-s1 libgomp1 libstdc++6 | LC_ALL=C sort')"
+            --cpus=1 --memory=1g --read-only --entrypoint /usr/bin/dpkg-query "$CUDA_IMAGE" \
+            -W '-f=${binary:Package}\t${Version}\n' libc6 libgcc-s1 libgomp1 libstdc++6)"
           cleanup_image_container() { docker rm --force "$image_container" >/dev/null 2>&1 || true; }
           trap cleanup_image_container EXIT
-          docker start --attach "$image_container" > "$RUNNER_TEMP/image-runtime-packages.txt"
+          docker start --attach "$image_container" | LC_ALL=C sort > "$RUNNER_TEMP/image-runtime-packages.txt"
           docker cp "$image_container:/usr/share/doc/gcc-14-base/copyright" "$RUNNER_TEMP/image-gcc-copyright.txt"
           cmp runtime_sidecars/licenses/GCC-libgomp-copyright.txt "$RUNNER_TEMP/image-gcc-copyright.txt"
           cmp runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt "$RUNNER_TEMP/image-runtime-packages.txt"

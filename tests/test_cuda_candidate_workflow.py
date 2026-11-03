@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
+import re
+import subprocess
 import unittest
+from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +41,24 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertIn("--cidfile \"$CID_FILE\"", builder)
         self.assertNotIn("--gpus", builder)
         self.assertIn("--pull=never", builder)
+
+    def test_platform_package_format_reaches_dpkg_query_without_bash_expansion(self):
+        workflow = (ROOT / ".github/workflows/native-cuda-sm120-candidate.yml").read_text(encoding="utf-8")
+        step = workflow.split("- name: Verify pinned Ubuntu runtime notice and package list", 1)[1]
+        format_match = re.search(r"-W ('[^']+') libc6", step)
+        self.assertIsNotNone(format_match)
+        format_argument = format_match.group(1)
+        evaluated = subprocess.run(
+            ["bash", "-e", "-u", "-o", "pipefail", "-c", f"printf '%s' {format_argument}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(evaluated.returncode, 0, evaluated.stderr)
+        self.assertEqual(evaluated.stdout, r"-f=${binary:Package}\t${Version}\n")
+        self.assertIn("--entrypoint /usr/bin/dpkg-query", step)
+        self.assertIn('docker start --attach "$image_container" | LC_ALL=C sort >', step)
+        self.assertIn('cmp runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt', step)
 
     def test_wheel_hashes_and_cmake_identity_come_from_committed_lock(self):
         fetcher = (ROOT / "scripts/fetch_cuda_sm120_inputs.py").read_text(encoding="utf-8")
