@@ -58,19 +58,25 @@ while IFS='=' read -r key value; do
   [[ -z "$key" || "$key" == \#* ]] && continue
   [[ "$key" =~ ^[A-Z0-9_]+$ && "$value" =~ ^[A-Za-z0-9._:/@-]+$ ]] || die "invalid lock entry"
   case "$key" in
-    LLAMA_CPP_REPOSITORY|LLAMA_CPP_COMMIT|LLAMA_CPP_TREE|LLAMA_CPP_VERSION|CUDA_IMAGE|CUDA_ARCHITECTURES|\
+    LLAMA_CPP_REPOSITORY|LLAMA_CPP_COMMIT|LLAMA_CPP_TREE|LLAMA_CPP_VERSION|LLAMA_CPP_PATCH_PATH|LLAMA_CPP_PATCH_SHA256|CUDA_IMAGE|CUDA_ARCHITECTURES|\
     CMAKE_VERSION|CMAKE_ARCHIVE_SHA256|CMAKE_BINARY_SHA256) ;;
     *) die "unknown lock key: $key" ;;
   esac
   [[ -z "${lock[$key]+x}" ]] || die "duplicate lock key: $key"
   lock[$key]="$value"
 done < "$INPUTS"
-for key in LLAMA_CPP_REPOSITORY LLAMA_CPP_COMMIT LLAMA_CPP_TREE LLAMA_CPP_VERSION CUDA_IMAGE \
+for key in LLAMA_CPP_REPOSITORY LLAMA_CPP_COMMIT LLAMA_CPP_TREE LLAMA_CPP_VERSION LLAMA_CPP_PATCH_PATH LLAMA_CPP_PATCH_SHA256 CUDA_IMAGE \
            CUDA_ARCHITECTURES CMAKE_VERSION CMAKE_ARCHIVE_SHA256 CMAKE_BINARY_SHA256; do
   [[ -n "${lock[$key]:-}" ]] || die "missing lock key: $key"
 done
 [[ "${lock[LLAMA_CPP_COMMIT]}" == 7acb4e8cd2ce21f457d1298e75fad729520d263c ]] || die "unexpected source pin"
 [[ "${lock[LLAMA_CPP_TREE]}" == 5a77024ea13397365f3be1610bee5573b0c42f1f ]] || die "unexpected source tree pin"
+[[ "${lock[LLAMA_CPP_PATCH_PATH]}" == runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch ]] || die "unexpected source patch path"
+[[ "${lock[LLAMA_CPP_PATCH_SHA256]}" =~ ^[a-f0-9]{64}$ ]] || die "invalid source patch SHA-256 pin"
+PATCH_FILE="$ROOT_DIR/${lock[LLAMA_CPP_PATCH_PATH]}"
+[[ -f "$PATCH_FILE" && ! -L "$PATCH_FILE" ]] || die "reviewed CUDA source patch is missing or a symlink"
+patch_hash="$(sha256sum "$PATCH_FILE" | cut -d ' ' -f1)"
+[[ "$patch_hash" == "${lock[LLAMA_CPP_PATCH_SHA256]}" ]] || die "CUDA source patch SHA-256 does not match lock"
 [[ "${lock[LLAMA_CPP_VERSION]}" =~ ^b([0-9]+)$ ]] || die "unexpected llama.cpp build label"
 LOCK_LLAMA_BUILD_NUMBER="${BASH_REMATCH[1]}"
 [[ "${lock[CUDA_IMAGE]}" == nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:16656a1ef115bca9e1f820c6349876f1486d2b3c9a0e615773799fe402960dc5 ]] || die "unexpected CUDA image"
@@ -130,6 +136,7 @@ if [[ -e "$WORK_ROOT" || -L "$WORK_ROOT" ]]; then
     [[ -f "$work_inputs" && ! -L "$work_inputs" ]] || die "existing work tree has no pinned input receipt"
     grep -Fxq "source_commit=${lock[LLAMA_CPP_COMMIT]}" "$work_inputs" || die "existing work source identity differs"
     grep -Fxq "source_tree=${lock[LLAMA_CPP_TREE]}" "$work_inputs" || die "existing work source tree differs"
+    grep -Fxq "source_patch_sha256=${lock[LLAMA_CPP_PATCH_SHA256]}" "$work_inputs" || die "existing work source patch differs"
     grep -Fxq "source_build_number=$source_build_number" "$work_inputs" || die "existing work build number differs"
     grep -Fxq "cuda_image=${lock[CUDA_IMAGE]}" "$work_inputs" || die "existing work CUDA image differs"
     grep -Fxq "cuda_architectures=${lock[CUDA_ARCHITECTURES]}" "$work_inputs" || die "existing work CUDA architecture differs"
@@ -146,6 +153,7 @@ if [[ ! -f "$WORK_ROOT/.candidate-work-inputs.env" ]]; then
   cat > "$WORK_ROOT/.candidate-work-inputs.env" <<EOF
 source_commit=${lock[LLAMA_CPP_COMMIT]}
 source_tree=${lock[LLAMA_CPP_TREE]}
+source_patch_sha256=${lock[LLAMA_CPP_PATCH_SHA256]}
 source_build_number=$source_build_number
 cuda_image=${lock[CUDA_IMAGE]}
 cuda_architectures=${lock[CUDA_ARCHITECTURES]}
@@ -155,6 +163,7 @@ fi
 OUTPUT_ROOT="$(realpath -e "$OUTPUT_ROOT")"
 WORK_ROOT="$(realpath -e "$WORK_ROOT")"
 build_dir="$WORK_ROOT/build"
+patched_source="$WORK_ROOT/patched-source"
 mkdir -p "$build_dir"
 docker_bin="$(command -v docker)" || die "Docker is required"
 cmake_stage=""
@@ -237,9 +246,10 @@ cmd=("$docker_bin" run --rm --pull=never --cidfile "$CID_FILE" --runtime=runc --
   --tmpfs /tmp:rw,noexec,nosuid,size=256m
   --user "$(id -u):$(id -g)" --env HOME=/tmp --env JOBS
   --env LOCK_LLAMA_CPP_COMMIT --env LOCK_LLAMA_CPP_TREE --env LOCK_LLAMA_CPP_VERSION --env LOCK_LLAMA_BUILD_NUMBER
+  --env LOCK_LLAMA_CPP_PATCH_SHA256 --env LOCK_LLAMA_CPP_PATCH_PATH
   --env LOCK_CUDA_IMAGE --env LOCK_CUDA_ARCHITECTURES
   --env LOCK_CMAKE_VERSION --env LOCK_CMAKE_ARCHIVE_SHA256 --env LOCK_CMAKE_BINARY_SHA256
-  --mount "type=bind,src=$source_real,dst=/src,readonly"
+  --mount "type=bind,src=$patched_source,dst=/src,readonly"
   --mount "type=bind,src=$build_dir,dst=/build"
   --mount "type=bind,src=$cmake_real,dst=/opt/cmake,readonly"
   --mount "type=bind,src=$OUTPUT_ROOT,dst=/out"
@@ -286,25 +296,47 @@ printf "source_commit=%s\nsource_tree=%s\nsource_version=%s\nCUDA enabled=ON\ncu
   "$(sha256sum /build/ggml/src/ggml-cuda/libggml-cuda.a | cut -d " " -f1)" "$cubin_count" \
   > /out/cuda-build-config.txt
 sha256sum /out/llama-server > /out/llama-server.sha256
-printf "source_commit=%s\nsource_tree=%s\nsource_version=%s\nsource_build_number=%s\ncuda_image=%s\ncuda_architectures=%s\ncmake_version=%s\ncmake_archive_sha256=%s\ncmake_binary_sha256=%s\n" \
-  "$LOCK_LLAMA_CPP_COMMIT" "$LOCK_LLAMA_CPP_TREE" "$LOCK_LLAMA_CPP_VERSION" "$LOCK_LLAMA_BUILD_NUMBER" "$LOCK_CUDA_IMAGE" \
-  "$LOCK_CUDA_ARCHITECTURES" "$LOCK_CMAKE_VERSION" "$LOCK_CMAKE_ARCHIVE_SHA256" \
+printf "source_commit=%s\nsource_tree=%s\nsource_version=%s\nsource_build_number=%s\nsource_patch_sha256=%s\nsource_patch_path=%s\ncuda_image=%s\ncuda_architectures=%s\ncmake_version=%s\ncmake_archive_sha256=%s\ncmake_binary_sha256=%s\n" \
+  "$LOCK_LLAMA_CPP_COMMIT" "$LOCK_LLAMA_CPP_TREE" "$LOCK_LLAMA_CPP_VERSION" "$LOCK_LLAMA_BUILD_NUMBER" \
+  "$LOCK_LLAMA_CPP_PATCH_SHA256" "$LOCK_LLAMA_CPP_PATCH_PATH" "$LOCK_CUDA_IMAGE" "$LOCK_CUDA_ARCHITECTURES" "$LOCK_CMAKE_VERSION" "$LOCK_CMAKE_ARCHIVE_SHA256" \
   "$LOCK_CMAKE_BINARY_SHA256" > /out/candidate-provenance.env
 printf "%s\n" "$version" >> /out/candidate-provenance.env'
 
 if [[ "$DRY_RUN" == 1 ]]; then
-  printf 'LOCK_LLAMA_CPP_COMMIT=%q LOCK_LLAMA_CPP_TREE=%q LOCK_LLAMA_CPP_VERSION=%q LOCK_LLAMA_BUILD_NUMBER=%q LOCK_CUDA_IMAGE=%q LOCK_CUDA_ARCHITECTURES=%q LOCK_CMAKE_VERSION=%q LOCK_CMAKE_ARCHIVE_SHA256=%q LOCK_CMAKE_BINARY_SHA256=%q JOBS=%q ' \
-    "${lock[LLAMA_CPP_COMMIT]}" "${lock[LLAMA_CPP_TREE]}" "${lock[LLAMA_CPP_VERSION]}" "$LOCK_LLAMA_BUILD_NUMBER" "${lock[CUDA_IMAGE]}" \
+  printf 'LOCK_LLAMA_CPP_COMMIT=%q LOCK_LLAMA_CPP_TREE=%q LOCK_LLAMA_CPP_VERSION=%q LOCK_LLAMA_BUILD_NUMBER=%q LOCK_LLAMA_CPP_PATCH_SHA256=%q LOCK_LLAMA_CPP_PATCH_PATH=%q LOCK_CUDA_IMAGE=%q LOCK_CUDA_ARCHITECTURES=%q LOCK_CMAKE_VERSION=%q LOCK_CMAKE_ARCHIVE_SHA256=%q LOCK_CMAKE_BINARY_SHA256=%q JOBS=%q ' \
+    "${lock[LLAMA_CPP_COMMIT]}" "${lock[LLAMA_CPP_TREE]}" "${lock[LLAMA_CPP_VERSION]}" "$LOCK_LLAMA_BUILD_NUMBER" \
+    "${lock[LLAMA_CPP_PATCH_SHA256]}" "${lock[LLAMA_CPP_PATCH_PATH]}" "${lock[CUDA_IMAGE]}" \
     "${lock[CUDA_ARCHITECTURES]}" "${lock[CMAKE_VERSION]}" "${lock[CMAKE_ARCHIVE_SHA256]}" "${lock[CMAKE_BINARY_SHA256]}" "$JOBS"
   printf '%q ' "${cmd[@]}" "$container_script"
   printf '\n'
   exit 0
 fi
 
+# Materialize a pristine archive at the locked commit, then apply only the hash-pinned
+# patch. The supplied checkout remains clean and its commit/tree identify upstream.
+if [[ -e "$patched_source" || -L "$patched_source" ]]; then
+  [[ -d "$patched_source" && ! -L "$patched_source" && \
+     -f "$patched_source/.airunner-patched-source-inputs.env" && ! -L "$patched_source/.airunner-patched-source-inputs.env" ]] || \
+    die "refusing to reuse unmarked patched source"
+  grep -Fxq "source_commit=${lock[LLAMA_CPP_COMMIT]}" "$patched_source/.airunner-patched-source-inputs.env" || die "patched source commit differs"
+  grep -Fxq "source_tree=${lock[LLAMA_CPP_TREE]}" "$patched_source/.airunner-patched-source-inputs.env" || die "patched source tree differs"
+  grep -Fxq "patch_sha256=${lock[LLAMA_CPP_PATCH_SHA256]}" "$patched_source/.airunner-patched-source-inputs.env" || die "patched source patch differs"
+  rm -rf -- "$patched_source"
+fi
+mkdir -m 0755 "$patched_source"
+git -C "$source_real" archive --format=tar "${lock[LLAMA_CPP_COMMIT]}" | tar --extract --no-same-owner --no-same-permissions --file=- --directory "$patched_source"
+patch --dry-run --batch --forward --fuzz=0 -p1 --directory "$patched_source" < "$PATCH_FILE" >/dev/null || die "reviewed CUDA source patch does not apply cleanly"
+patch --batch --forward --fuzz=0 -p1 --directory "$patched_source" < "$PATCH_FILE" >/dev/null || die "failed to apply reviewed CUDA source patch"
+printf 'source_commit=%s\nsource_tree=%s\npatch_path=%s\npatch_sha256=%s\n' \
+  "${lock[LLAMA_CPP_COMMIT]}" "${lock[LLAMA_CPP_TREE]}" "${lock[LLAMA_CPP_PATCH_PATH]}" "${lock[LLAMA_CPP_PATCH_SHA256]}" \
+  > "$patched_source/.airunner-patched-source-inputs.env"
+
 LOCK_LLAMA_CPP_COMMIT="${lock[LLAMA_CPP_COMMIT]}" \
 LOCK_LLAMA_CPP_TREE="${lock[LLAMA_CPP_TREE]}" \
 LOCK_LLAMA_CPP_VERSION="${lock[LLAMA_CPP_VERSION]}" \
 LOCK_LLAMA_BUILD_NUMBER="$LOCK_LLAMA_BUILD_NUMBER" \
+LOCK_LLAMA_CPP_PATCH_SHA256="${lock[LLAMA_CPP_PATCH_SHA256]}" \
+LOCK_LLAMA_CPP_PATCH_PATH="${lock[LLAMA_CPP_PATCH_PATH]}" \
 LOCK_CUDA_IMAGE="${lock[CUDA_IMAGE]}" \
 LOCK_CUDA_ARCHITECTURES="${lock[CUDA_ARCHITECTURES]}" \
 LOCK_CMAKE_VERSION="${lock[CMAKE_VERSION]}" \

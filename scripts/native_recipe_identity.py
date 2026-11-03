@@ -25,6 +25,7 @@ PROFILES = {
         "scripts/fetch_cuda_sm120_inputs.py",
         "runtime_sidecars/cuda-sm120-candidate.env",
         "runtime_sidecars/cuda-sm120-package-lock.json",
+        "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch",
         "runtime_sidecars/licenses/GCC-libgomp-copyright.txt",
         "runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt",
     ),

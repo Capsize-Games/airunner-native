@@ -48,7 +48,37 @@ selection in a later change.
   `build/runtime-sidecars-candidates/cuda-sm120`. It includes the server,
   license, server SHA-256, source/build provenance, and version output.
 
-## Validation and current status
+## Maintained MTP offload correction
+
+The unpatched hosted candidate `41720615159` loaded the Qwen3.5-9B Q8 model
+at context 32768, but reported 33/34 GPU layers and assigned model block 0 to
+the CPU. The source loader counts `n_layer_all`, including its appended
+next-token prediction block, while negative GPU-layer requests used the
+smaller main-stack count. This prevents a full-offload acceptance claim.
+
+`runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch` changes that
+negative branch to `hparams.n_layer_all + 1`. Nonnegative requests are unchanged.
+Its SHA-256 is
+`09ce5a6113a69416dfa721f4be19c4d70f75c4b36028ece9926786c5bba814a4`.
+The same return expression was inspected in the upstream function at
+[`149f5641b931aaf33697d70f9abc90c3e5300247`](https://github.com/ggml-org/llama.cpp/blob/149f5641b931aaf33697d70f9abc90c3e5300247/src/llama-model.cpp#L2372).
+This attributes the examined source; it does not identify the introducing commit
+or adopt the rest of that revision. No duplicate upstream report is needed.
+
+The producer archives the pristine pinned checkout into its owned work area,
+applies only the hash-pinned patch, and leaves the supplied checkout unchanged.
+The lock, producer recipe, build receipt, archive and promotion checks bind the
+patch identity. The archive retains the patch beside its build recipe. A small
+C++ regression applies the real patch and checks the changed expression for
+MTP/non-MTP, negative, CPU and positive layer requests without loading a model.
+Actual patched CUDA compilation and model/API/cleanup acceptance remain required.
+
+Device acceptance can correlate server-selected PCI identity with driver
+inventory and the owned server PID's GPU UUID. The public receipt retains only
+the device name, physical compute capability and private-observation digest;
+compiled CUDA architecture alone is not device evidence.
+
+## Earlier unpatched candidate evidence
 
 The build recipe checks the exact source commit and clean working tree, the
 source tag's commit count, exact CMake archive and executable digests, CUDA and

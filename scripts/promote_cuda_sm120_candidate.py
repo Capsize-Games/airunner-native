@@ -437,7 +437,9 @@ def _validate_acceptance_gpu(receipt: dict[str, Any]) -> None:
 
 def _validate_acceptance_device(device: Any) -> None:
     """Require device identity and capability from server-side evidence."""
-    if not isinstance(device, dict) or device.get("source") not in {"server-log", "server-metrics"}:
+    if not isinstance(device, dict) or device.get("source") not in {
+        "server-log", "server-metrics", "server-log+nvidia-smi"
+    }:
         raise PromotionError("native acceptance lacks server-observed device evidence")
     identity = device.get("identity")
     evidence_sha = device.get("evidence_sha256")
@@ -532,6 +534,11 @@ def _validate_candidate_source(candidate: dict[str, Any], lock: dict[str, Any]) 
             raise PromotionError(f"candidate source {key} differs from current package lock")
     if source.get("repository") != expected_source.get("repository"):
         raise PromotionError("candidate source repository differs from current package lock")
+    expected_patches = expected_source.get("patches_applied")
+    if (not isinstance(expected_patches, list) or len(expected_patches) != 1
+            or candidate.get("patches_applied") != expected_patches
+            or source.get("patches_applied") != expected_patches):
+        raise PromotionError("candidate source patch identity differs from current package lock")
     if candidate.get("status") != "candidate only; not published, activated, or GPU-runtime tested":
         raise PromotionError("candidate provenance has an unexpected status")
     if build.get("launch_entrypoint") != "bin/llama-server-cuda":

@@ -79,6 +79,7 @@ class PromoteCudaCandidateTests(unittest.TestCase):
             "scripts/fetch_cuda_sm120_inputs.py",
             "runtime_sidecars/cuda-sm120-candidate.env",
             "runtime_sidecars/cuda-sm120-package-lock.json",
+            "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch",
             "runtime_sidecars/licenses/GCC-libgomp-copyright.txt",
             "runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt",
         )
@@ -139,6 +140,7 @@ class PromoteCudaCandidateTests(unittest.TestCase):
         source["repository"] = source["repository"]
         self.candidate_manifest = {
             "schema": "airunner-native-cuda-sidecar-candidate-v1",
+            "patches_applied": lock["source"]["patches_applied"],
             "artifact": "fixture candidate",
             "status": "candidate only; not published, activated, or GPU-runtime tested",
             "source": source,
@@ -220,6 +222,14 @@ class PromoteCudaCandidateTests(unittest.TestCase):
             "started_at_utc": "2026-11-03T00:00:00Z",
             "finished_at_utc": "2026-11-03T00:01:00Z",
         }
+
+    def test_accepts_server_and_driver_bound_device_evidence(self) -> None:
+        promotion._validate_acceptance_device({
+            "source": "server-log+nvidia-smi",
+            "identity": "NVIDIA GeForce RTX 5080",
+            "compute_capability": "12.0",
+            "evidence_sha256": "e" * 64,
+        })
 
     def _run(self) -> tuple[Path, Path, Path, Path]:
         self.acceptance_path.write_text(json.dumps(self.acceptance))
@@ -386,6 +396,18 @@ class PromoteCudaCandidateTests(unittest.TestCase):
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o755
                 archive.addfile(info)
+
+    def test_candidate_source_patch_must_match_package_lock(self) -> None:
+        original = self.candidate_manifest["patches_applied"]
+        self.candidate_manifest["patches_applied"] = []
+        self._refresh_candidate_manifests()
+        self._rewrite_archive_and_receipt()
+        with self.assertRaisesRegex(promotion.PromotionError, "source patch identity"):
+            self._run()
+        self._assert_no_output()
+        self.candidate_manifest["patches_applied"] = original
+        self._refresh_candidate_manifests()
+        self._rewrite_archive_and_receipt()
 
     def test_rejects_wrong_or_changed_producer_recipe_identity(self) -> None:
         bad = dict(self.producer)

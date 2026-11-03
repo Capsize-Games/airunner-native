@@ -54,9 +54,12 @@ class PackageCudaSm120Tests(unittest.TestCase):
         self.commit = "7acb4e8cd2ce21f457d1298e75fad729520d263c"
         self.tree = "8" * 40
         image = "nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:" + "1" * 64
+        patch_path = "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch"
+        patch_sha = hashlib.sha256((REPO / patch_path).read_bytes()).hexdigest()
         self.profile = self.base / "candidate.env"
         self.profile.write_text(
             f"LLAMA_CPP_COMMIT={self.commit}\nLLAMA_CPP_TREE={self.tree}\nLLAMA_CPP_VERSION=b9523\n"
+            f"LLAMA_CPP_PATCH_PATH={patch_path}\nLLAMA_CPP_PATCH_SHA256={patch_sha}\n"
             f"CUDA_IMAGE={image}\nCUDA_ARCHITECTURES=120a-real\n"
             "CMAKE_VERSION=3.31.6\nCMAKE_ARCHIVE_SHA256=" + "2" * 64 + "\n"
             "CMAKE_BINARY_SHA256=" + "3" * 64 + "\n"
@@ -64,6 +67,7 @@ class PackageCudaSm120Tests(unittest.TestCase):
         self.image = image
         (self.build / "candidate-provenance.env").write_text(
             f"source_commit={self.commit}\nsource_tree={self.tree}\nsource_version=b9523\nsource_build_number=9523\n"
+            f"source_patch_path={patch_path}\nsource_patch_sha256={patch_sha}\n"
             f"cuda_image={image}\ncuda_architectures=120a-real\ncmake_version=3.31.6\n"
             "cmake_archive_sha256=" + "2" * 64 + "\n"
             "cmake_binary_sha256=" + "3" * 64 + "\n"
@@ -167,7 +171,9 @@ class PackageCudaSm120Tests(unittest.TestCase):
             "schema_version": 1,
             "target": "Linux x86_64 fixture",
             "source": {"repository": "https://example.invalid/llama.cpp", "commit": self.commit, "tree": self.tree,
-                       "version": "b9523", "build_number": 9523, "patches_applied": []},
+                       "version": "b9523", "build_number": 9523,
+                       "patches_applied": [{"path": "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch",
+                                            "sha256": hashlib.sha256((REPO / "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch").read_bytes()).hexdigest()}]},
             "build": {"image": self.image, "cmake_version": "3.31.6",
                       "cmake_archive_sha256": "2" * 64, "cmake_binary_sha256": "3" * 64,
                       "cuda_architectures": "120a-real",
@@ -354,6 +360,23 @@ class PackageCudaSm120Tests(unittest.TestCase):
                 )
         self.assertFalse(output.exists())
         self.assertFalse(archive.exists())
+
+    def test_source_patch_provenance_is_required_and_preserved(self) -> None:
+        original = (self.build / "candidate-provenance.env").read_text(encoding="utf-8")
+        (self.build / "candidate-provenance.env").write_text(
+            original.replace("source_patch_sha256=" + hashlib.sha256(
+                (REPO / "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch").read_bytes()
+            ).hexdigest(), "source_patch_sha256=" + "0" * 64),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(packager.PackageError, "source_patch_sha256"):
+            self._package("wrong-patch")
+        (self.build / "candidate-provenance.env").write_text(original, encoding="utf-8")
+        package, _, _ = self._package("preserved-patch")
+        stored = package / "provenance/recipe/llama.cpp-cuda-all-mtp-offload.patch"
+        self.assertEqual(stored.read_bytes(), (REPO / "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch").read_bytes())
+        manifest = json.loads((package / "provenance/manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["patches_applied"], self.lock["source"]["patches_applied"])
 
     def test_source_tree_identity_is_bound_to_build_provenance(self) -> None:
         provenance_path = self.build / "candidate-provenance.env"

@@ -120,6 +120,26 @@ def validate_platform() -> None:
         raise PackageError("CUDA SM 120a packaging is supported only on Linux x86_64")
 
 
+def reviewed_source_patch(lock: dict[str, Any]) -> dict[str, str]:
+    """Require the one hash-pinned source correction supported by this recipe."""
+    patches = lock["source"].get("patches_applied")
+    if not isinstance(patches, list) or len(patches) != 1 or not isinstance(patches[0], dict):
+        raise PackageError("package lock must identify exactly one reviewed source patch")
+    patch = patches[0]
+    if (patch.get("path") != "runtime_sidecars/patches/llama.cpp-cuda-all-mtp-offload.patch"
+            or not re.fullmatch(r"[0-9a-f]{64}", str(patch.get("sha256", "")))):
+        raise PackageError("package lock source patch identity is malformed")
+    return patch
+
+
+def copy_reviewed_source_patch(source_patch: dict[str, str], recipe_root: Path) -> None:
+    """Retain the exact reviewed patch bytes beside the producer recipe."""
+    source = require_regular_file(ROOT / source_patch["path"], "reviewed source patch")
+    if sha256_file(source) != source_patch["sha256"]:
+        raise PackageError("reviewed source patch changed during candidate packaging")
+    shutil.copyfile(source, recipe_root / "llama.cpp-cuda-all-mtp-offload.patch")
+
+
 def validate_build_inputs(build_output: Path, receipt_path: Path, lock: dict[str, Any]) -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
     marker = require_regular_file(build_output / ".airunner-native-candidate", "candidate marker")
     if marker.read_text(encoding="utf-8").strip() != "airunner-native-candidate-v1:cuda-sm120":
@@ -146,11 +166,14 @@ def validate_build_inputs(build_output: Path, receipt_path: Path, lock: dict[str
     provenance = parse_kv_file(provenance_path, "candidate provenance")
     build = lock["build"]
     source = lock["source"]
+    patch = reviewed_source_patch(lock)
     expected = {
         "source_commit": source["commit"],
         "source_tree": source["tree"],
         "source_version": source["version"],
         "source_build_number": str(source["build_number"]),
+        "source_patch_sha256": patch["sha256"],
+        "source_patch_path": patch["path"],
         "cuda_image": build["image"],
         "cuda_architectures": build["cuda_architectures"],
         "cmake_version": build["cmake_version"],
@@ -499,6 +522,8 @@ def package_candidate(
         "LLAMA_CPP_COMMIT": lock["source"]["commit"],
         "LLAMA_CPP_TREE": lock["source"]["tree"],
         "LLAMA_CPP_VERSION": lock["source"]["version"],
+        "LLAMA_CPP_PATCH_PATH": lock["source"]["patches_applied"][0]["path"],
+        "LLAMA_CPP_PATCH_SHA256": lock["source"]["patches_applied"][0]["sha256"],
         "CUDA_IMAGE": build_lock["image"],
         "CUDA_ARCHITECTURES": build_lock["cuda_architectures"],
         "CMAKE_VERSION": build_lock["cmake_version"],
@@ -586,6 +611,7 @@ exec "$server_dir/llama-server" "$@"
         shutil.copyfile(ROOT / "scripts/native_recipe_identity.py", root / "provenance/recipe/native_recipe_identity.py")
         shutil.copyfile(PROFILE_PATH, root / "provenance/recipe/cuda-sm120-candidate.env")
         shutil.copyfile(LOCK_PATH, root / "provenance/recipe/cuda-sm120-package-lock.json")
+        copy_reviewed_source_patch(reviewed_source_patch(lock), root / "provenance/recipe")
         shutil.copyfile(Path(__file__), root / "provenance/recipe/package_cuda_sm120_candidate.py")
         build_script = ROOT / "scripts" / "build_cuda_sm120_candidate.sh"
         shutil.copyfile(build_script, root / "provenance/recipe/build_cuda_sm120_candidate.sh")
@@ -632,7 +658,7 @@ exec "$server_dir/llama-server" "$@"
                 "container_id": receipt["container_id"],
                 "compiler": next((line.removeprefix("built with ") for line in (build_output / "candidate-provenance.env").read_text(encoding="utf-8").splitlines() if line.startswith("built with ")), "recorded in candidate provenance"),
             },
-            "patches_applied": [],
+            "patches_applied": lock["source"]["patches_applied"],
             "reviewed_dynamic_loads": lock["reviewed_dynamic_loads"],
             "validations": ["version/help checks completed in isolated build container", "readelf dependency tags and RUNPATHs checked", "static SM120 cubin receipt checked", "wheel archives and selected member hashes checked"],
             "not_established": ["GPU runtime compatibility", "model inference or performance", "service integration or candidate activation"]
