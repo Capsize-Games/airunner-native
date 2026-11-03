@@ -37,6 +37,7 @@ class SidecarSafetyTests(unittest.TestCase):
                 "WHISPER_CPP_REPOSITORY=https://github.com/ggerganov/whisper.cpp.git",
                 "WHISPER_CPP_COMMIT=9386f239401074690479731c1e41683fbbeac557",
                 "WHISPER_CPP_VERSION=v1.8.4",
+                "WHISPER_CPP_AUTH_PATCH_SHA256=a0d518cddd0b0ed1f679772109d30802d88d3148447d58d49c862aa2c5781697",
             )
         ) + "\n"
 
@@ -55,6 +56,18 @@ class SidecarSafetyTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(marker.exists())
+
+    def test_valid_pins_accept_numbered_sha256_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            pins = Path(temporary) / "pins.env"
+            pins.write_text(self.valid_pins(), encoding="utf-8")
+            result = self.run_shell(
+                'PINS_FILE="$TEST_PINS"; load_pins; '
+                'test "$WHISPER_CPP_AUTH_PATCH_SHA256" = '
+                '"a0d518cddd0b0ed1f679772109d30802d88d3148447d58d49c862aa2c5781697"',
+                env={"TEST_PINS": str(pins)},
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_malformed_commit_and_unexpected_repository_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -138,6 +151,49 @@ class SidecarSafetyTests(unittest.TestCase):
             result = self.run_shell(f'JOBS="{value}"; detect_jobs >/dev/null')
             self.assertEqual(result.returncode, expected, f"jobs={value}: {result.stderr}")
 
+    def test_whisper_source_guard_rejects_unrelated_dirty_and_untracked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "whisper"
+            source.mkdir()
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            server = source / "examples/server/server.cpp"
+            server.parent.mkdir(parents=True)
+            server.write_text("upstream\n", encoding="utf-8")
+            (source / ".gitignore").write_text("ignored.tmp\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "examples/server/server.cpp", ".gitignore"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+
+            clean = self.run_shell(
+                'assert_whisper_source_clean_or_auth_patch "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+
+            (source / "examples/server/auth.hpp").write_text("auth\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "-N", "examples/server/auth.hpp"], check=True)
+            server.write_text("patched\n", encoding="utf-8")
+            valid_patch = self.run_shell(
+                'assert_whisper_source_auth_patch_only "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertEqual(valid_patch.returncode, 0, valid_patch.stderr)
+
+            (source / "unrelated.tmp").write_text("unexpected\n", encoding="utf-8")
+            rejected = self.run_shell(
+                'assert_whisper_source_clean_or_auth_patch "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
+            (source / "unrelated.tmp").unlink()
+            (source / "ignored.tmp").write_text("ignored but present\n", encoding="utf-8")
+            ignored_rejected = self.run_shell(
+                'assert_whisper_source_clean_or_auth_patch "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertNotEqual(ignored_rejected.returncode, 0, ignored_rejected.stdout + ignored_rejected.stderr)
+
     def test_binary_digest_is_computed_from_actual_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "sidecar"
@@ -189,7 +245,9 @@ class SidecarSafetyTests(unittest.TestCase):
                 'LLAMA_CPP_VERSION=b10000; '
                 'WHISPER_CPP_REPOSITORY=https://github.com/ggerganov/whisper.cpp.git; '
                 'WHISPER_CPP_COMMIT=9386f239401074690479731c1e41683fbbeac557; '
-                'WHISPER_CPP_VERSION=v1.8.4; write_manifest',
+                'WHISPER_CPP_VERSION=v1.8.4; '
+                'WHISPER_CPP_AUTH_PATCH_SHA256=a0d518cddd0b0ed1f679772109d30802d88d3148447d58d49c862aa2c5781697; '
+                'write_manifest',
                 env=env,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -201,6 +259,10 @@ class SidecarSafetyTests(unittest.TestCase):
             self.assertIn("AIRUNNER_CPU_BASELINE=GGML_NATIVE=OFF", manifest)
             self.assertIn(f"AIRUNNER_LLAMA_SERVER_SHA256={hashlib.sha256(llama).hexdigest()}", manifest)
             self.assertIn(f"AIRUNNER_WHISPER_SERVER_SHA256={hashlib.sha256(whisper).hexdigest()}", manifest)
+            self.assertIn(
+                "AIRUNNER_WHISPER_CPP_AUTH_PATCH_SHA256=a0d518cddd0b0ed1f679772109d30802d88d3148447d58d49c862aa2c5781697",
+                manifest,
+            )
             self.assertTrue((share_dir / "runtime_pins.env").is_file())
 
 

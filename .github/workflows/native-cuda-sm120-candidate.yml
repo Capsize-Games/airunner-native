@@ -1,0 +1,123 @@
+name: Native CUDA SM 120a Candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-cuda-sm120a-candidate
+  cancel-in-progress: false
+
+jobs:
+  build-candidate:
+    # This is an artifact-only candidate build. It never attaches a release
+    # asset or changes the existing CPU/Windows sidecar matrix.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CUDA_IMAGE: nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:16656a1ef115bca9e1f820c6349876f1486d2b3c9a0e615773799fe402960dc5
+      SOURCE_COMMIT: 7acb4e8cd2ce21f457d1298e75fad729520d263c
+      SOURCE_DIR: ${{ runner.temp }}/llama-cpp-reviewed-source
+      INPUT_DIR: ${{ runner.temp }}/cuda-sm120-inputs
+      BUILD_DIR: ${{ runner.temp }}/cuda-sm120-build
+      WORK_DIR: ${{ runner.temp }}/cuda-sm120-work
+      PACKAGE_DIR: ${{ runner.temp }}/cuda-sm120-package
+      ARCHIVE_DIR: ${{ runner.temp }}/cuda-sm120-archive
+
+    steps:
+      - name: Checkout candidate recipe
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Fetch exact reviewed public source into isolated job workspace
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          git -c core.hooksPath=/dev/null -c init.templateDir=/dev/null \
+            clone --no-checkout --no-tags https://github.com/ggml-org/llama.cpp.git "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" -c core.hooksPath=/dev/null -c protocol.file.allow=never \
+            fetch --no-tags origin "$SOURCE_COMMIT"
+          git -C "$SOURCE_DIR" -c core.hooksPath=/dev/null checkout --detach "$SOURCE_COMMIT"
+          test "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C "$SOURCE_DIR" rev-parse 'HEAD^{tree}')" = 5a77024ea13397365f3be1610bee5573b0c42f1f
+          test -z "$(git -C "$SOURCE_DIR" status --porcelain --untracked-files=all)"
+          test "$(git -C "$SOURCE_DIR" rev-list --count HEAD)" = 9523
+          sha256sum "$SOURCE_DIR/LICENSE"
+
+      - name: Fetch hash-locked public build inputs
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          python3 scripts/fetch_cuda_sm120_inputs.py --output-dir "$INPUT_DIR" | tee "$RUNNER_TEMP/cuda-sm120-input-hashes.txt"
+          sha256sum --check "$RUNNER_TEMP/cuda-sm120-input-hashes.txt"
+
+      - name: Pull the pinned CUDA build image
+        timeout-minutes: 30
+        run: docker pull --platform linux/amd64 "$CUDA_IMAGE"
+
+      - name: Build CUDA server in networkless runc container
+        timeout-minutes: 125
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=60s 120m \
+            ./scripts/build_cuda_sm120_candidate.sh \
+              --source "$SOURCE_DIR" \
+              --cmake-archive "$INPUT_DIR/cmake-3.31.6-linux-x86_64.tar.gz" \
+              --output-root "$BUILD_DIR" \
+              --work-root "$WORK_DIR" \
+              --jobs 2
+
+      - name: Verify pinned Ubuntu runtime notice and package list
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_container="$(docker create --pull=never --runtime=runc --platform linux/amd64 --network=none \
+            --cpus=1 --memory=1g --read-only --entrypoint /bin/bash "$CUDA_IMAGE" -ceu \
+            'dpkg-query -W -f="${binary:Package}\t${Version}\n" libc6 libgcc-s1 libgomp1 libstdc++6 | LC_ALL=C sort')"
+          cleanup_image_container() { docker rm --force "$image_container" >/dev/null 2>&1 || true; }
+          trap cleanup_image_container EXIT
+          docker start --attach "$image_container" > "$RUNNER_TEMP/image-runtime-packages.txt"
+          docker cp "$image_container:/usr/share/doc/gcc-14-base/copyright" "$RUNNER_TEMP/image-gcc-copyright.txt"
+          cmp runtime_sidecars/licenses/GCC-libgomp-copyright.txt "$RUNNER_TEMP/image-gcc-copyright.txt"
+          cmp runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt "$RUNNER_TEMP/image-runtime-packages.txt"
+          sha256sum --check <<EOF
+          20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79  runtime_sidecars/licenses/GCC-libgomp-copyright.txt
+          b2f8f37a609b22716d209deff9159e724e87f397d2432e51e3ba0834b8560e80  runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt
+          EOF
+          trap - EXIT
+          cleanup_image_container
+
+      - name: Package relocatable CUDA candidate and complete receipts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARCHIVE_DIR"
+          python3 scripts/package_cuda_sm120_candidate.py \
+            --build-output "$BUILD_DIR" \
+            --build-receipt "$BUILD_DIR/build-container-receipt.json" \
+            --runtime-wheel "$INPUT_DIR/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" \
+            --cublas-wheel "$INPUT_DIR/nvidia_cublas_cu12-12.9.1.4-py3-none-manylinux_2_27_x86_64.whl" \
+            --nvrtc-wheel "$INPUT_DIR/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl" \
+            --gcc-notice runtime_sidecars/licenses/GCC-libgomp-copyright.txt \
+            --platform-packages runtime_sidecars/ubuntu-24.04-platform-runtime-packages.txt \
+            --output-dir "$PACKAGE_DIR" \
+            --archive "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz"
+          sha256sum "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz" \
+            > "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz.sha256"
+          sha256sum --check "$ARCHIVE_DIR/airunner-native-linux-x86_64-cuda-sm120a-candidate.tar.gz.sha256"
+
+      - name: Upload non-release candidate artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-linux-x86_64-cuda-sm120a-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cuda-sm120-archive/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

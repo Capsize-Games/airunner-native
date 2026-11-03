@@ -99,7 +99,7 @@ load_pins() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*$ ]] && continue
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        if [[ ! "$line" =~ ^([A-Z_]+)=([A-Za-z0-9._:/-]+)[[:space:]]*$ ]]; then
+        if [[ ! "$line" =~ ^([A-Z0-9_]+)=([A-Za-z0-9._:/-]+)[[:space:]]*$ ]]; then
             echo "Invalid pin syntax in $PINS_FILE" >&2
             return 1
         fi
@@ -107,7 +107,8 @@ load_pins() {
         value="${BASH_REMATCH[2]}"
         case "$key" in
             LLAMA_CPP_REPOSITORY|LLAMA_CPP_COMMIT|LLAMA_CPP_VERSION|\
-            WHISPER_CPP_REPOSITORY|WHISPER_CPP_COMMIT|WHISPER_CPP_VERSION) ;;
+            WHISPER_CPP_REPOSITORY|WHISPER_CPP_COMMIT|WHISPER_CPP_VERSION|\
+            WHISPER_CPP_AUTH_PATCH_SHA256) ;;
             *) echo "Unknown pin field in $PINS_FILE: $key" >&2; return 1 ;;
         esac
         if [[ -v "parsed[$key]" ]]; then
@@ -119,7 +120,8 @@ load_pins() {
 
     local field
     for field in LLAMA_CPP_REPOSITORY LLAMA_CPP_COMMIT LLAMA_CPP_VERSION \
-        WHISPER_CPP_REPOSITORY WHISPER_CPP_COMMIT WHISPER_CPP_VERSION; do
+        WHISPER_CPP_REPOSITORY WHISPER_CPP_COMMIT WHISPER_CPP_VERSION \
+        WHISPER_CPP_AUTH_PATCH_SHA256; do
         if [[ ! -v "parsed[$field]" ]]; then
             echo "Missing pin field in $PINS_FILE: $field" >&2
             return 1
@@ -138,6 +140,10 @@ load_pins() {
             return 1
         fi
     done
+    if [[ ! "${parsed[WHISPER_CPP_AUTH_PATCH_SHA256]}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "Invalid whisper.cpp authentication patch SHA256 in $PINS_FILE" >&2
+        return 1
+    fi
     [[ "${parsed[LLAMA_CPP_VERSION]}" =~ ^b[0-9]+$ ]] || {
         echo "Invalid llama.cpp version label in $PINS_FILE" >&2; return 1;
     }
@@ -151,6 +157,7 @@ load_pins() {
     WHISPER_CPP_REPOSITORY="${parsed[WHISPER_CPP_REPOSITORY]}"
     WHISPER_CPP_COMMIT="${parsed[WHISPER_CPP_COMMIT]}"
     WHISPER_CPP_VERSION="${parsed[WHISPER_CPP_VERSION]}"
+    WHISPER_CPP_AUTH_PATCH_SHA256="${parsed[WHISPER_CPP_AUTH_PATCH_SHA256]}"
 }
 
 detect_jobs() {
@@ -393,6 +400,7 @@ EOF
         manifest_set AIRUNNER_WHISPER_CPP_REPOSITORY "$WHISPER_CPP_REPOSITORY"
         manifest_set AIRUNNER_WHISPER_CPP_COMMIT "$WHISPER_CPP_COMMIT"
         manifest_set AIRUNNER_WHISPER_CPP_VERSION "$WHISPER_CPP_VERSION"
+        manifest_set AIRUNNER_WHISPER_CPP_AUTH_PATCH_SHA256 "$WHISPER_CPP_AUTH_PATCH_SHA256"
         manifest_set AIRUNNER_TARGET_PLATFORM "$TARGET_PLATFORM"
         manifest_set AIRUNNER_BUILD_TYPE "$CMAKE_BUILD_TYPE"
         manifest_set AIRUNNER_BUILD_JOBS "$jobs"
@@ -454,11 +462,50 @@ build_llama_sidecar() {
 build_whisper_sidecar() {
     local source_path="$SOURCE_DIR/whisper.cpp"
     local build_path="$BUILD_DIR/whisper.cpp"
+    local patch_path="$ROOT_DIR/runtime_sidecars/patches/whisper.cpp-v1.8.4-api-auth.patch"
+    local patch_target="examples/server/server.cpp"
+    local patch_hash current_patch_hash
 
     fetch_repo \
         "whisper.cpp" \
         "$WHISPER_CPP_REPOSITORY" \
         "$WHISPER_CPP_COMMIT"
+
+    if [[ "$WHISPER_CPP_COMMIT" != "9386f239401074690479731c1e41683fbbeac557" ]]; then
+        echo "Whisper authentication patch is bound to commit 9386f239401074690479731c1e41683fbbeac557" >&2
+        return 1
+    fi
+    patch_hash="$(sha256_file "$patch_path")"
+    if [[ "$patch_hash" != "$WHISPER_CPP_AUTH_PATCH_SHA256" ]]; then
+        echo "Whisper authentication patch hash does not match runtime_pins.env" >&2
+        return 1
+    fi
+    if [[ "$(git -C "$source_path" rev-parse HEAD)" != "$WHISPER_CPP_COMMIT" ]]; then
+        echo "Whisper source checkout does not match the pinned commit" >&2
+        return 1
+    fi
+    if [[ -f "$source_path/examples/server/auth.hpp" ]]; then
+        git -C "$source_path" add -N examples/server/auth.hpp
+    fi
+    assert_whisper_source_clean_or_auth_patch "$source_path"
+    if git -C "$source_path" diff --quiet -- examples/server/server.cpp examples/server/auth.hpp; then
+        git -C "$source_path" apply --check "$patch_path"
+        git -C "$source_path" apply "$patch_path"
+    else
+        current_patch_hash="$(git -C "$source_path" diff --binary -- examples/server/server.cpp examples/server/auth.hpp | sha256sum | awk '{print $1}')"
+        if [[ "$current_patch_hash" != "$WHISPER_CPP_AUTH_PATCH_SHA256" ]]; then
+            echo "Whisper source has unreviewed modifications before patch application" >&2
+            return 1
+        fi
+    fi
+    git -C "$source_path" add -N examples/server/auth.hpp
+    assert_whisper_source_auth_patch_only "$source_path"
+    current_patch_hash="$(git -C "$source_path" diff --binary -- examples/server/server.cpp examples/server/auth.hpp | sha256sum | awk '{print $1}')"
+    if [[ "$current_patch_hash" != "$WHISPER_CPP_AUTH_PATCH_SHA256" ]]; then
+        echo "Applied whisper authentication patch does not match its reviewed hash" >&2
+        return 1
+    fi
+
     configure_build \
         "$source_path" \
         "$build_path" \
@@ -469,6 +516,33 @@ build_whisper_sidecar() {
     copy_binary "$build_path" "whisper-server"
 }
 
+assert_whisper_source_clean_or_auth_patch() {
+    local source_path="$1" status
+    local -a changes=()
+    status="$(git -C "$source_path" status --porcelain --untracked-files=all --ignored=matching)"
+    [[ -n "$status" ]] || return 0
+    mapfile -t changes <<< "$status"
+    if [[ "${#changes[@]}" -ne 2 || \
+        "${changes[0]}" != " A examples/server/auth.hpp" || \
+        "${changes[1]}" != " M examples/server/server.cpp" ]]; then
+        echo "Whisper source checkout has unexpected dirty or untracked files" >&2
+        return 1
+    fi
+}
+
+assert_whisper_source_auth_patch_only() {
+    local source_path="$1" status
+    local -a changes=()
+    status="$(git -C "$source_path" status --porcelain --untracked-files=all --ignored=matching)"
+    mapfile -t changes <<< "$status"
+    if [[ "${#changes[@]}" -ne 2 || \
+        "${changes[0]}" != " A examples/server/auth.hpp" || \
+        "${changes[1]}" != " M examples/server/server.cpp" ]]; then
+        echo "Whisper source checkout has unexpected dirty or untracked files after patch" >&2
+        return 1
+    fi
+}
+
 main() {
     parse_args "$@"
     detect_jobs >/dev/null
@@ -476,9 +550,13 @@ main() {
     configure_platform
     clean_target
     prepare_layout
+    run_cmd python3 "$ROOT_DIR/scripts/native_recipe_identity.py" capture \
+        --profile cpu --output "$BUNDLE_SHARE_DIR/producer-recipe.json"
     build_llama_sidecar
     build_whisper_sidecar
     write_manifest
+    run_cmd python3 "$ROOT_DIR/scripts/native_recipe_identity.py" verify \
+        --profile cpu --output "$BUNDLE_SHARE_DIR/producer-recipe.json"
 
     echo
     echo "Built native runtime sidecars in: $OUTPUT_ROOT/$TARGET_PLATFORM"

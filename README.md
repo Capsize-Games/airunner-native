@@ -31,6 +31,14 @@ added cross-repo coordination for no real benefit. It moved back into
 - `.github/workflows/native-runtime-sidecars.yml` -- builds the
   `linux`/`windows` matrix on every release published in this
   repository and attaches the resulting bundles as release assets.
+- `scripts/build_cuda_sm120_candidate.sh` and
+  `scripts/package_cuda_sm120_candidate.py` -- build and hash-lock a separate
+  Linux x86_64 CUDA SM 120a candidate. The package inputs are listed in
+  `runtime_sidecars/cuda-sm120-package-lock.json`.
+
+The existing release workflow does not build or publish the CUDA candidate.
+It remains a separate artifact profile; the default Linux and Windows bundle
+paths are unchanged.
 
 ## Build locally
 
