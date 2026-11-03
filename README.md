@@ -37,9 +37,13 @@ added cross-repo coordination for no real benefit. It moved back into
   Linux x86_64 CUDA SM 120a candidate. The package inputs are listed in
   `runtime_sidecars/cuda-sm120-package-lock.json`.
 
-The existing release workflow does not build or publish the CUDA candidate.
-It remains a separate artifact profile; the default Linux and Windows bundle
-paths are unchanged.
+The CUDA candidate workflow builds an artifact without publishing a release.
+Release promotion requires a separately validated CUDA profile for the same
+annotated tag, uploaded to its draft release first. The native release workflow
+checks those three asset digests and the Linux/Windows CPU archives, then
+publishes the complete nine-asset set as one immutable release. A missing CUDA
+profile prevents publication. Existing published tags and CPU bundle paths
+remain unchanged.
 
 ## Build locally
 
