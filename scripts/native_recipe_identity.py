@@ -16,7 +16,7 @@ PROFILES = {
         "scripts/native_recipe_identity.py",
         "scripts/build_runtime_sidecars.sh",
         "runtime_sidecars/runtime_pins.env",
-        "runtime_sidecars/patches/whisper.cpp-v1.8.4-api-auth.patch",
+        "runtime_sidecars/patches/whisper.cpp-v1.9.5-api-auth.patch",
     ),
     "cuda-sm120a": (
         "scripts/native_recipe_identity.py",

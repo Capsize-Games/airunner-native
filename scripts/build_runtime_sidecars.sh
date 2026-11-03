@@ -12,11 +12,13 @@ CMAKE_BUILD_TYPE="Release"
 JOBS="${AIRUNNER_BUILD_JOBS:-4}"
 CLEAN=0
 DRY_RUN=0
+OFFLINE=0
 ENABLE_CUDA="${AIRUNNER_SIDECAR_ENABLE_CUDA:-0}"
 CUDA_ARCHITECTURES="${AIRUNNER_SIDECAR_CUDA_ARCHITECTURES:-}"
 
 CMAKE_PLATFORM_ARGS=()
 CMAKE_CUDA_ARGS=()
+CMAKE_OPENMP_ARGS=()
 BINARY_SUFFIX=""
 
 usage() {
@@ -30,6 +32,7 @@ Options:
   --jobs COUNT                     Build with 1-64 parallel jobs (default: 4)
   --clean                          Remove previous output for the target
   --dry-run                        Print build steps without running them
+  --offline                        Use only existing, clean pinned source checkouts
   --enable-cuda                    Build llama.cpp and whisper.cpp with CUDA
   --cuda-architectures LIST        Set CUDA architectures for both builds
   -h, --help                       Show this help text
@@ -69,6 +72,10 @@ parse_args() {
                 ;;
             --dry-run)
                 DRY_RUN=1
+                shift
+                ;;
+            --offline)
+                OFFLINE=1
                 shift
                 ;;
             --enable-cuda)
@@ -140,15 +147,14 @@ load_pins() {
             return 1
         fi
     done
-    if [[ ! "${parsed[WHISPER_CPP_AUTH_PATCH_SHA256]}" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "Invalid whisper.cpp authentication patch SHA256 in $PINS_FILE" >&2
-        return 1
-    fi
     [[ "${parsed[LLAMA_CPP_VERSION]}" =~ ^b[0-9]+$ ]] || {
         echo "Invalid llama.cpp version label in $PINS_FILE" >&2; return 1;
     }
     [[ "${parsed[WHISPER_CPP_VERSION]}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
         echo "Invalid whisper.cpp version label in $PINS_FILE" >&2; return 1;
+    }
+    [[ "${parsed[WHISPER_CPP_AUTH_PATCH_SHA256]}" =~ ^[0-9a-f]{64}$ ]] || {
+        echo "Invalid whisper.cpp authentication patch SHA256 in $PINS_FILE" >&2; return 1;
     }
 
     LLAMA_CPP_REPOSITORY="${parsed[LLAMA_CPP_REPOSITORY]}"
@@ -170,8 +176,7 @@ detect_jobs() {
 
 canonical_root() {
     local input="$1"
-    mkdir -p -- "$input"
-    realpath -e -- "$input"
+    realpath -m -- "$input"
 }
 
 assert_owned_target() {
@@ -195,6 +200,7 @@ assert_owned_target() {
 configure_platform() {
     CMAKE_PLATFORM_ARGS=()
     CMAKE_CUDA_ARGS=()
+    CMAKE_OPENMP_ARGS=()
     BINARY_SUFFIX=""
     C_COMPILER="${CC:-cc}"
     CXX_COMPILER="${CXX:-c++}"
@@ -235,23 +241,32 @@ configure_platform() {
     CXX_COMPILER="$cxx"
     C_COMPILER="$cc"
 
+    local gomp_archive
+    gomp_archive="$("$CXX_COMPILER" -print-file-name=libgomp.a)"
+    if [[ ! -f "$gomp_archive" || -L "$gomp_archive" ]]; then
+        echo "A regular static MinGW libgomp.a is required for Windows sidecars" >&2
+        return 1
+    fi
+    CMAKE_OPENMP_ARGS=(
+        -DOpenMP_C_LIB_NAMES=gomp
+        -DOpenMP_CXX_LIB_NAMES=gomp
+        -DOpenMP_gomp_LIBRARY="$gomp_archive"
+    )
+
     CMAKE_PLATFORM_ARGS=(
         -DCMAKE_SYSTEM_NAME=Windows
         -DCMAKE_C_COMPILER="$cc"
         -DCMAKE_CXX_COMPILER="$cxx"
+        -DCMAKE_EXE_LINKER_FLAGS=-static
     )
     BINARY_SUFFIX=".exe"
 
     local compat_header="$ROOT_DIR/runtime_sidecars/mingw_thread_power_throttling_compat.h"
-    local probe_source="$WORK_ROOT/$TARGET_PLATFORM/thread_power_throttling_probe.c"
-    mkdir -p "$(dirname "$probe_source")"
-    cat > "$probe_source" <<'EOF'
-#include <windows.h>
-#ifndef THREAD_POWER_THROTTLING_CURRENT_VERSION
-#error missing_thread_power_throttling_api
-#endif
-EOF
-    if "$cc" -E -x c "$probe_source" -o /dev/null 2>/dev/null; then
+    if printf '%s\n' \
+        '#include <windows.h>' \
+        '#ifndef THREAD_POWER_THROTTLING_CURRENT_VERSION' \
+        '#error missing_thread_power_throttling_api' \
+        '#endif' | "$cc" -E -x c - -o /dev/null 2>/dev/null; then
         # Toolchain headers declare the thread power-throttling API; nothing to do.
         :
     else
@@ -306,12 +321,51 @@ fetch_repo() {
     local commit="$3"
     local destination="$SOURCE_DIR/$name"
 
-    if [[ ! -d "$destination/.git" ]]; then
+    if [[ -L "$destination" ]]; then
+        echo "Refusing symlink source checkout: $destination" >&2
+        return 1
+    fi
+    if [[ "$OFFLINE" == "1" ]]; then
+        if [[ ! -d "$destination/.git" ]]; then
+            echo "Offline mode requires an existing Git checkout: $destination" >&2
+            return 1
+        fi
+    elif [[ ! -d "$destination/.git" ]]; then
         run_cmd git clone --filter=blob:none "$repository" "$destination"
     fi
 
-    run_cmd git -C "$destination" fetch --depth 1 origin "$commit"
-    run_cmd git -C "$destination" checkout --detach "$commit"
+    if [[ "$DRY_RUN" != "1" ]]; then
+        local origin status
+        origin="$(git -C "$destination" remote get-url origin)" || return 1
+        if [[ "$origin" != "$repository" ]]; then
+            echo "Unexpected source origin for $name: $origin" >&2
+            return 1
+        fi
+        status="$(git -C "$destination" status --porcelain --ignored --untracked-files=all)" || return 1
+        if [[ -n "$status" ]]; then
+            echo "Source checkout is not clean before pin verification: $destination" >&2
+            return 1
+        fi
+    fi
+
+    if [[ "$OFFLINE" != "1" ]]; then
+        run_cmd git -C "$destination" fetch --depth 1 origin "$commit"
+        run_cmd git -C "$destination" checkout --detach "$commit"
+    fi
+
+    if [[ "$DRY_RUN" != "1" ]]; then
+        local head status
+        head="$(git -C "$destination" rev-parse HEAD)" || return 1
+        if [[ "$head" != "$commit" ]]; then
+            echo "Source checkout does not match pinned commit for $name: $head" >&2
+            return 1
+        fi
+        status="$(git -C "$destination" status --porcelain --ignored --untracked-files=all)" || return 1
+        if [[ -n "$status" ]]; then
+            echo "Source checkout is not clean after pin verification: $destination" >&2
+            return 1
+        fi
+    fi
 }
 
 configure_build() {
@@ -325,8 +379,11 @@ configure_build() {
         -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
         -DBUILD_SHARED_LIBS=OFF \
         -DGGML_NATIVE=OFF \
+        -DGGML_RPC=OFF \
+        -DGGML_CUDA_CUB_3DOT2=OFF \
         "${CMAKE_PLATFORM_ARGS[@]}" \
         "${CMAKE_CUDA_ARGS[@]}" \
+        "${CMAKE_OPENMP_ARGS[@]}" \
         "$@"
 }
 
@@ -355,6 +412,94 @@ copy_binary() {
     fi
 
     run_cmd cp "$source_binary" "$destination_binary"
+}
+
+copy_upstream_licenses() {
+    local upstream source destination
+    for upstream in llama.cpp whisper.cpp; do
+        source="$SOURCE_DIR/$upstream/LICENSE"
+        destination="$BUNDLE_SHARE_DIR/licenses/$upstream-LICENSE"
+        if [[ "$DRY_RUN" == "1" ]]; then
+            echo "+ copy $source $destination"
+            continue
+        fi
+        if [[ ! -f "$source" || -L "$source" ]]; then
+            echo "Expected regular upstream license file was not found: $source" >&2
+            return 1
+        fi
+        if [[ -L "${destination%/*}" ]]; then
+            echo "Refusing symlink license output directory: ${destination%/*}" >&2
+            return 1
+        fi
+        mkdir -p "${destination%/*}"
+        cp -- "$source" "$destination"
+    done
+}
+
+copy_windows_runtime_licenses() {
+    [[ "$TARGET_PLATFORM" == "windows" ]] || return 0
+
+    local source destination license
+    if [[ "$DRY_RUN" != "1" ]]; then
+        verify_windows_runtime_package_versions
+    fi
+    for license in \
+        GPL-3.txt \
+        mingw-gcc-runtime-copyright.txt \
+        mingw-runtime-source.txt \
+        winpthreads-COPYING.txt; do
+        source="$ROOT_DIR/runtime_sidecars/licenses/$license"
+        destination="$BUNDLE_SHARE_DIR/licenses/$license"
+        if [[ "$DRY_RUN" == "1" ]]; then
+            echo "+ copy $source $destination"
+            continue
+        fi
+        if [[ ! -f "$source" || -L "$source" ]]; then
+            echo "Expected regular MinGW runtime notice was not found: $source" >&2
+            return 1
+        fi
+        if [[ -L "${destination%/*}" ]]; then
+            echo "Refusing symlink license output directory: ${destination%/*}" >&2
+            return 1
+        fi
+        mkdir -p "${destination%/*}"
+        cp -- "$source" "$destination"
+    done
+}
+
+verify_windows_runtime_package_versions() {
+    local package expected actual
+    local -a packages=(
+        "gcc-mingw-w64-x86-64-posix-runtime=13.2.0-6ubuntu1+26.1"
+        "gcc-mingw-w64-x86-64-posix=13.2.0-6ubuntu1+26.1"
+        "g++-mingw-w64-x86-64-posix=13.2.0-6ubuntu1+26.1"
+        "mingw-w64-x86-64-dev=11.0.1-3build1"
+        "mingw-w64-common=11.0.1-3build1"
+    )
+    if ! command -v dpkg-query >/dev/null 2>&1; then
+        echo "dpkg-query is required to verify the reviewed Windows runtime packages" >&2
+        return 1
+    fi
+    for entry in "${packages[@]}"; do
+        package="${entry%%=*}"
+        expected="${entry#*=}"
+        actual="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null || true)"
+        if [[ "$actual" != "$expected" ]]; then
+            echo "Windows runtime notice input mismatch for $package: expected $expected, got ${actual:-not-installed}" >&2
+            return 1
+        fi
+    done
+}
+
+remove_whisper_generated_source_file() {
+    local generated="$SOURCE_DIR/whisper.cpp/bindings/javascript/package.json"
+    if [[ -e "$generated" || -L "$generated" ]]; then
+        if [[ -L "$generated" || ! -f "$generated" ]]; then
+            echo "Refusing to remove unexpected Whisper generated path: $generated" >&2
+            return 1
+        fi
+        rm -- "$generated"
+    fi
 }
 
 write_manifest() {
@@ -412,6 +557,12 @@ EOF
         manifest_set AIRUNNER_CUDA_ENABLED "$ENABLE_CUDA"
         manifest_set AIRUNNER_CUDA_ARCHITECTURES "$cuda_arch"
         manifest_set AIRUNNER_CPU_BASELINE "GGML_NATIVE=OFF"
+        if [[ "$TARGET_PLATFORM" == "windows" ]]; then
+            manifest_set AIRUNNER_WINDOWS_RUNTIME_LINKAGE "static"
+            manifest_set AIRUNNER_MINGW_GCC_RUNTIME_PACKAGE_VERSION "13.2.0-6ubuntu1+26.1"
+            manifest_set AIRUNNER_MINGW_W64_PACKAGE_VERSION "11.0.1-3build1"
+            manifest_set AIRUNNER_WINDOWS_RUNTIME_NOTICES "GPL-3.txt,mingw-gcc-runtime-copyright.txt,mingw-runtime-source.txt,winpthreads-COPYING.txt"
+        fi
         manifest_set AIRUNNER_LLAMA_SERVER_SHA256 "$llama_hash"
         manifest_set AIRUNNER_WHISPER_SERVER_SHA256 "$whisper_hash"
     } >> "$manifest_path"
@@ -462,8 +613,8 @@ build_llama_sidecar() {
 build_whisper_sidecar() {
     local source_path="$SOURCE_DIR/whisper.cpp"
     local build_path="$BUILD_DIR/whisper.cpp"
-    local patch_path="$ROOT_DIR/runtime_sidecars/patches/whisper.cpp-v1.8.4-api-auth.patch"
-    local patch_target="examples/server/server.cpp"
+
+    local patch_path="$ROOT_DIR/runtime_sidecars/patches/whisper.cpp-v1.9.5-api-auth.patch"
     local patch_hash current_patch_hash
 
     fetch_repo \
@@ -471,8 +622,8 @@ build_whisper_sidecar() {
         "$WHISPER_CPP_REPOSITORY" \
         "$WHISPER_CPP_COMMIT"
 
-    if [[ "$WHISPER_CPP_COMMIT" != "9386f239401074690479731c1e41683fbbeac557" ]]; then
-        echo "Whisper authentication patch is bound to commit 9386f239401074690479731c1e41683fbbeac557" >&2
+    if [[ "$WHISPER_CPP_COMMIT" != "d1be6fde11ac6e0407606b4e42fe72d34add8037" ]]; then
+        echo "Whisper authentication patch is bound to the reviewed v1.9.5 source commit" >&2
         return 1
     fi
     patch_hash="$(sha256_file "$patch_path")"
@@ -480,32 +631,38 @@ build_whisper_sidecar() {
         echo "Whisper authentication patch hash does not match runtime_pins.env" >&2
         return 1
     fi
-    if [[ "$(git -C "$source_path" rev-parse HEAD)" != "$WHISPER_CPP_COMMIT" ]]; then
-        echo "Whisper source checkout does not match the pinned commit" >&2
-        return 1
-    fi
-    if [[ -f "$source_path/examples/server/auth.hpp" ]]; then
-        git -C "$source_path" add -N examples/server/auth.hpp
-    fi
-    assert_whisper_source_clean_or_auth_patch "$source_path"
-    if git -C "$source_path" diff --quiet -- examples/server/server.cpp examples/server/auth.hpp; then
-        git -C "$source_path" apply --check "$patch_path"
-        git -C "$source_path" apply "$patch_path"
+    if [[ "$DRY_RUN" == "1" ]]; then
+        run_cmd git -C "$source_path" apply --check "$patch_path"
+        run_cmd git -C "$source_path" apply "$patch_path"
     else
+        if [[ -f "$source_path/examples/server/auth.hpp" ]]; then
+            git -C "$source_path" add -N examples/server/auth.hpp
+        fi
+        assert_whisper_source_clean_or_auth_patch "$source_path"
+        if git -C "$source_path" diff --quiet -- examples/server/server.cpp examples/server/auth.hpp; then
+            git -C "$source_path" apply --check "$patch_path"
+            git -C "$source_path" apply "$patch_path"
+        else
+            current_patch_hash="$(git -C "$source_path" diff --binary -- examples/server/server.cpp examples/server/auth.hpp | sha256sum | awk '{print $1}')"
+            if [[ "$current_patch_hash" != "$WHISPER_CPP_AUTH_PATCH_SHA256" ]]; then
+                echo "Whisper source has unreviewed modifications before patch application" >&2
+                return 1
+            fi
+        fi
+        git -C "$source_path" add -N examples/server/auth.hpp
+        assert_whisper_source_auth_patch_only "$source_path"
         current_patch_hash="$(git -C "$source_path" diff --binary -- examples/server/server.cpp examples/server/auth.hpp | sha256sum | awk '{print $1}')"
         if [[ "$current_patch_hash" != "$WHISPER_CPP_AUTH_PATCH_SHA256" ]]; then
-            echo "Whisper source has unreviewed modifications before patch application" >&2
+            echo "Applied whisper authentication patch does not match its reviewed hash" >&2
             return 1
         fi
     fi
-    git -C "$source_path" add -N examples/server/auth.hpp
-    assert_whisper_source_auth_patch_only "$source_path"
-    current_patch_hash="$(git -C "$source_path" diff --binary -- examples/server/server.cpp examples/server/auth.hpp | sha256sum | awk '{print $1}')"
-    if [[ "$current_patch_hash" != "$WHISPER_CPP_AUTH_PATCH_SHA256" ]]; then
-        echo "Applied whisper authentication patch does not match its reviewed hash" >&2
+
+    local generated="$source_path/bindings/javascript/package.json"
+    if [[ -e "$generated" || -L "$generated" ]]; then
+        echo "Refusing pre-existing Whisper generated source path: $generated" >&2
         return 1
     fi
-
     configure_build \
         "$source_path" \
         "$build_path" \
@@ -514,7 +671,9 @@ build_whisper_sidecar() {
         -DWHISPER_SDL2=OFF
     build_target "$build_path" "whisper-server"
     copy_binary "$build_path" "whisper-server"
+    remove_whisper_generated_source_file
 }
+
 
 assert_whisper_source_clean_or_auth_patch() {
     local source_path="$1" status
@@ -547,6 +706,10 @@ main() {
     parse_args "$@"
     detect_jobs >/dev/null
     load_pins
+    if [[ "$OFFLINE" == "1" && "$CLEAN" == "1" ]]; then
+        echo "--offline cannot be combined with --clean because clean removes the pinned source checkouts" >&2
+        return 1
+    fi
     configure_platform
     clean_target
     prepare_layout
@@ -554,6 +717,8 @@ main() {
         --profile cpu --output "$BUNDLE_SHARE_DIR/producer-recipe.json"
     build_llama_sidecar
     build_whisper_sidecar
+    copy_upstream_licenses
+    copy_windows_runtime_licenses
     write_manifest
     run_cmd python3 "$ROOT_DIR/scripts/native_recipe_identity.py" verify \
         --profile cpu --output "$BUNDLE_SHARE_DIR/producer-recipe.json"

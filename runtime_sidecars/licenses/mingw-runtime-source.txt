@@ -1,0 +1,28 @@
+Windows static-link runtime notices
+
+The Windows sidecar build uses the Ubuntu 24.04 (Noble) MinGW-w64 packages
+reported by hosted build run 41370834595:
+
+  gcc-mingw-w64-x86-64-posix-runtime 13.2.0-6ubuntu1+26.1
+  gcc-mingw-w64-x86-64-posix         13.2.0-6ubuntu1+26.1
+  g++-mingw-w64-x86-64-posix         13.2.0-6ubuntu1+26.1
+  mingw-w64-x86-64-dev               11.0.1-3build1
+  mingw-w64-common                   11.0.1-3build1
+
+The GCC runtime notice is reproduced from the gcc-mingw-w64 26.1 source
+package's debian/copyright. The source package descriptor SHA-256 is
+9cc5a84101b1c1641c001b43e457ea710619c5c8301151f0080a917e9fe64272 and its
+source archive SHA-256 is
+57ad0cef766683b97b37de82a16a5b69f81a28c1469512832f557bca2506c8ef.
+The Winpthreads notice is copied from
+mingw-w64 11.0.1/mingw-w64-libraries/winpthreads/COPYING. Its original source
+package descriptor SHA-256 is
+a9c601ae428084b0d4d1685e41fad9d5aaa4c67ab8a3ac99d3dae0ec2999db4f and its
+original source archive SHA-256 is
+3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10.
+The complete GPL version 3 text is included as GPL-3.txt.
+
+The build links Windows executables with MinGW runtime libraries statically
+and checks their PE imports against the reviewed Windows system DLL allowlist.
+These notices identify the reviewed runtime package inputs; they do not assert
+which individual runtime objects are present in each executable.

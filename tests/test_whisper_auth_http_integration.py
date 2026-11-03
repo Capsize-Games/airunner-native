@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import unittest
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,27 +21,28 @@ SOURCE = Path(
 )
 
 
-def test_pre_routing_auth_survives_whisper_error_rewrite() -> None:
-    auth_header = SOURCE / "examples/server/auth.hpp"
-    if not auth_header.is_file():
-        pytest.skip("patched whisper.cpp source is not present")
-    compiler = shutil.which("c++") or shutil.which("g++")
-    if compiler is None:
-        pytest.skip("C++ compiler unavailable for isolated auth test")
-    with tempfile.TemporaryDirectory(prefix="whisper-auth-http-") as temporary:
-        binary = Path(temporary) / "auth-http-test"
-        subprocess.run(
-            [
-                compiler,
-                "-std=c++17",
-                "-pthread",
-                "-I",
-                str(auth_header.parent),
-                str(FIXTURE),
-                "-o",
-                str(binary),
-            ],
-            check=True,
-            timeout=60,
-        )
-        subprocess.run([str(binary)], check=True, timeout=15)
+class WhisperAuthHTTPTests(unittest.TestCase):
+    def test_pre_routing_auth_survives_whisper_error_rewrite(self) -> None:
+        auth_header = SOURCE / "examples/server/auth.hpp"
+        if not auth_header.is_file():
+            self.skipTest("patched whisper.cpp source is not present")
+        compiler = shutil.which("c++") or shutil.which("g++")
+        if compiler is None:
+            self.skipTest("C++ compiler unavailable for isolated auth test")
+        with tempfile.TemporaryDirectory(prefix="whisper-auth-http-") as temporary:
+            binary = Path(temporary) / "auth-http-test"
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=c++17",
+                    "-pthread",
+                    "-I",
+                    str(auth_header.parent),
+                    str(FIXTURE),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+                timeout=60,
+            )
+            subprocess.run([str(binary)], check=True, timeout=15)

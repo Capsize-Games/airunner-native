@@ -2,6 +2,12 @@ name: Native Runtime Sidecars
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Build sidecars and publish an immutable release from the selected annotated tag.
+        required: false
+        default: false
+        type: boolean
   release:
     types: [published]
 
@@ -10,12 +16,10 @@ permissions:
 
 jobs:
   build-sidecars:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # write is only needed to attach release assets in the last step
-    # below (and only fires on an actual release event); read would be
-    # enough for everything else this job does.
     permissions:
-      contents: write
+      contents: read
 
     strategy:
       fail-fast: false
@@ -26,7 +30,21 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify selected annotated tag before build
+        if: inputs.publish_release == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: ./scripts/upload_native_release_assets.sh --check-tag "$GITHUB_REF_NAME"
 
       - name: Install native build dependencies
         run: |
@@ -39,25 +57,206 @@ jobs:
             --clean \
             --target-platform ${{ matrix.target-platform }}
 
-      - name: Package sidecar bundle
+      - name: Reject dynamic MinGW runtime imports
+        if: matrix.target-platform == 'windows'
         run: |
-          tar -C "build/runtime-sidecars/${{ matrix.target-platform }}" \
-            -czf "runtime-sidecars-${{ matrix.target-platform }}.tar.gz" .
+          ./scripts/check_windows_runtime_imports.sh \
+            build/runtime-sidecars/windows/bin/llama-server.exe \
+            build/runtime-sidecars/windows/bin/whisper-server.exe
+
+      - name: Package sidecar bundle and provenance
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: ./scripts/package_runtime_sidecars.sh "${{ matrix.target-platform }}"
 
       - name: Upload sidecar bundle artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-sidecars-${{ matrix.target-platform }}
-          path: runtime-sidecars-${{ matrix.target-platform }}.tar.gz
+          if-no-files-found: error
+          path: |
+            runtime-sidecars-${{ matrix.target-platform }}.tar.gz
+            runtime-sidecars-${{ matrix.target-platform }}.tar.gz.sha256
+            runtime-sidecars-${{ matrix.target-platform }}-provenance.txt
 
-      # A workflow-run artifact (the upload step above) expires after 90
-      # days and isn't a stable download URL, so it can't be what the
-      # source application's own release pipeline consumes. A published
-      # release's assets are durable and individually addressable by
-      # tag, which is what a "fetch the pinned sidecar bundle" step in
-      # another repository's workflow needs.
-      - name: Attach bundle to the release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+  smoke-sidecars:
+    name: Launch ${{ matrix.target-platform }} sidecars on native OS
+    needs: [build-sidecars]
+    runs-on: ${{ matrix.target-platform == 'windows' && 'windows-2022' || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target-platform: [linux, windows]
+    steps:
+      - name: Download built sidecar bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          files: runtime-sidecars-${{ matrix.target-platform }}.tar.gz
+          name: runtime-sidecars-${{ matrix.target-platform }}
+          path: sidecar-artifact
+
+      - name: Verify archive digest
+        if: matrix.target-platform == 'linux'
+        shell: bash
+        run: cd sidecar-artifact && sha256sum --check --strict runtime-sidecars-linux.tar.gz.sha256
+
+      - name: Verify archive digest
+        if: matrix.target-platform == 'windows'
+        shell: pwsh
+        run: |
+          $archive = 'sidecar-artifact/runtime-sidecars-windows.tar.gz'
+          $checksum = 'sidecar-artifact/runtime-sidecars-windows.tar.gz.sha256'
+          $line = Get-Content -Raw $checksum
+          if ($line -notmatch '^([0-9a-f]{64})\s+runtime-sidecars-windows\.tar\.gz\s*(\r?\n)?$') {
+            throw 'Malformed Windows sidecar checksum file'
+          }
+          $expected = $Matches[1]
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Windows sidecar digest mismatch: $actual" }
+          Write-Host "runtime-sidecars-windows.tar.gz sha256=$actual"
+
+      - name: Extract verified Linux bundle
+        if: matrix.target-platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sidecar-bundle
+          tar --extract --gzip --no-same-owner --no-same-permissions \
+            --file sidecar-artifact/runtime-sidecars-linux.tar.gz \
+            --directory sidecar-bundle
+
+      - name: Extract verified Windows bundle
+        if: matrix.target-platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force sidecar-bundle | Out-Null
+          tar.exe -xzf sidecar-artifact/runtime-sidecars-windows.tar.gz -C sidecar-bundle
+
+      - name: Launch Linux binaries without models or server startup
+        if: matrix.target-platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$PWD/sidecar-bundle"
+          test -x "$bundle/bin/llama-server"
+          test -x "$bundle/bin/whisper-server"
+          test -f "$bundle/share/airunner/licenses/llama.cpp-LICENSE"
+          test -f "$bundle/share/airunner/licenses/whisper.cpp-LICENSE"
+          unset LLAMA_ARG_MODEL WHISPER_ARG_MODEL
+          export CUDA_VISIBLE_DEVICES=-1
+          timeout --signal=KILL 30s "$bundle/bin/llama-server" --version \
+            > llama-version.txt 2>&1
+          timeout --signal=KILL 30s "$bundle/bin/llama-server" --help \
+            > llama-help.txt 2>&1
+          timeout --signal=KILL 30s "$bundle/bin/whisper-server" --help \
+            > whisper-help.txt 2>&1
+          test -s llama-version.txt
+          grep -Eqi 'usage|options|help' llama-help.txt
+          grep -Eqi 'usage|options|help' whisper-help.txt
+          cat llama-version.txt
+
+      - name: Launch Windows binaries without models or server startup
+        if: matrix.target-platform == 'windows'
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $PWD 'sidecar-bundle'
+          $llama = Join-Path $bundle 'bin/llama-server.exe'
+          $whisper = Join-Path $bundle 'bin/whisper-server.exe'
+          if (!(Test-Path -PathType Leaf $llama) -or !(Test-Path -PathType Leaf $whisper)) {
+            throw 'Expected Windows sidecar executables are missing'
+          }
+          if (!(Test-Path -PathType Leaf (Join-Path $bundle 'share/airunner/licenses/llama.cpp-LICENSE')) -or
+              !(Test-Path -PathType Leaf (Join-Path $bundle 'share/airunner/licenses/whisper.cpp-LICENSE'))) {
+            throw 'Expected upstream license notices are missing'
+          }
+          foreach ($notice in @('GPL-3.txt', 'mingw-gcc-runtime-copyright.txt', 'mingw-runtime-source.txt', 'winpthreads-COPYING.txt')) {
+            if (!(Test-Path -PathType Leaf (Join-Path $bundle "share/airunner/licenses/$notice"))) {
+              throw "Expected MinGW runtime notice is missing: $notice"
+            }
+          }
+          Remove-Item Env:LLAMA_ARG_MODEL -ErrorAction SilentlyContinue
+          Remove-Item Env:WHISPER_ARG_MODEL -ErrorAction SilentlyContinue
+          $env:CUDA_VISIBLE_DEVICES = '-1'
+          function Invoke-SidecarSmoke([string]$Executable, [string]$Argument, [string]$Name) {
+            $stdout = Join-Path $PWD "$Name.stdout.txt"
+            $stderr = Join-Path $PWD "$Name.stderr.txt"
+            $process = Start-Process -FilePath $Executable -ArgumentList $Argument `
+              -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if (!$process.WaitForExit(30000)) {
+              $process.Kill()
+              throw "$Name $Argument exceeded the 30 second smoke limit"
+            }
+            if ($process.ExitCode -ne 0) { throw "$Name $Argument exited $($process.ExitCode)" }
+            $output = (Get-Content -Raw $stdout) + (Get-Content -Raw $stderr)
+            if ([string]::IsNullOrWhiteSpace($output)) { throw "$Name $Argument produced no output" }
+            if ($Argument -eq '--help' -and $output -notmatch '(?i)usage|options|help') {
+              throw "$Name help output did not contain usage text"
+            }
+            Write-Host "$Name $Argument succeeded"
+          }
+          Invoke-SidecarSmoke $llama '--version' 'llama-version'
+          Invoke-SidecarSmoke $llama '--help' 'llama-help'
+          Invoke-SidecarSmoke $whisper '--help' 'whisper-help'
+
+
+  promote-release:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
+    needs: [smoke-sidecars]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Download both verified sidecar bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: runtime-sidecars-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create draft, attach verified assets, and publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          ./scripts/upload_native_release_assets.sh \
+            "$GITHUB_REF_NAME" \
+            release-assets/runtime-sidecars-linux.tar.gz \
+            release-assets/runtime-sidecars-linux.tar.gz.sha256 \
+            release-assets/runtime-sidecars-linux-provenance.txt \
+            release-assets/runtime-sidecars-windows.tar.gz \
+            release-assets/runtime-sidecars-windows.tar.gz.sha256 \
+            release-assets/runtime-sidecars-windows-provenance.txt
+
+  verify-published-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact published source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Verify published immutable release without mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: ./scripts/upload_native_release_assets.sh --verify-published-tag "$GITHUB_REF_NAME"

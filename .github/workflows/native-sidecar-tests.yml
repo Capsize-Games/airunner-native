@@ -1,0 +1,52 @@
+name: Native Sidecar Input Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stdlib-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check shell syntax
+        run: |
+          for script in scripts/build_runtime_sidecars.sh scripts/build_cuda_sm120_candidate.sh scripts/check_windows_runtime_imports.sh scripts/package_runtime_sidecars.sh scripts/upload_native_release_assets.sh; do
+            bash -n "$script"
+          done
+
+      - name: Prepare exact reviewed source for model-free authentication tests
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          source scripts/build_runtime_sidecars.sh
+          load_pins
+          test "$WHISPER_CPP_COMMIT" = d1be6fde11ac6e0407606b4e42fe72d34add8037
+          auth_source="$RUNNER_TEMP/whisper-auth-source"
+          git -c core.hooksPath=/dev/null -c init.templateDir=/dev/null \
+            clone --depth=1 --no-tags --branch v1.9.5 \
+            https://github.com/ggml-org/whisper.cpp.git "$auth_source"
+          test "$(git -C "$auth_source" rev-parse HEAD)" = "$WHISPER_CPP_COMMIT"
+          test "$(git -C "$auth_source" rev-parse 'HEAD^{tree}')" = 6fe2755682242a5c01aba65a22b3c0305d747841
+          test -z "$(git -C "$auth_source" status --porcelain --untracked-files=all)"
+          patch="$GITHUB_WORKSPACE/runtime_sidecars/patches/whisper.cpp-v1.9.5-api-auth.patch"
+          test "$(sha256sum "$patch" | cut -d ' ' -f1)" = "$WHISPER_CPP_AUTH_PATCH_SHA256"
+          git -C "$auth_source" apply --check "$patch"
+          git -C "$auth_source" apply "$patch"
+          command -v c++
+          echo "AIRUNNER_WHISPER_AUTH_SOURCE=$auth_source" >> "$GITHUB_ENV"
+
+      - name: Run sidecar safety and packaging tests
+        timeout-minutes: 10
+        run: python3 -m unittest discover -s tests -v
