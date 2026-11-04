@@ -120,6 +120,7 @@ class PromoteCudaCandidateTests(unittest.TestCase):
     def _make_candidate_tree(self) -> None:
         lock = json.loads(self.lock)
         files = {
+            "README.md": (b"Original candidate README\n", 0o644),
             "bin/llama-server": (self.server_bytes, 0o755),
             "bin/llama-server-cuda": (
                 b'#!/bin/sh\nserver_dir="$(cd -- "$(dirname -- "$0")" && pwd)"\n'
@@ -295,6 +296,37 @@ class PromoteCudaCandidateTests(unittest.TestCase):
                 promotion_source_ref=f"refs/tags/{self.promotion_tag}",
             )
         self.assertEqual(archive.read_bytes(), (second_output / archive.name).read_bytes())
+
+    def test_current_checksums_verify_and_original_records_are_preserved(self) -> None:
+        originals = {
+            "SHA256SUMS.original": self.package / "SHA256SUMS",
+            "file-manifest.original.json": self.package / "provenance/file-manifest.json",
+            "README.original.md": self.package / "README.md",
+        }
+        expected = {name: path.read_bytes() for name, path in originals.items()}
+        profile, *_ = self._run()
+        for name, data in expected.items():
+            self.assertEqual((profile / "provenance/candidate-inputs" / name).read_bytes(), data)
+        rows = promotion._parse_sha_sums(profile / "SHA256SUMS")
+        self.assertEqual(set(rows), {
+            path.relative_to(profile).as_posix()
+            for path in profile.rglob("*")
+            if path.is_file() and path not in {
+                profile / "SHA256SUMS", profile / "profile-manifest.json",
+            }
+        })
+        checked = subprocess.run(
+            ["sha256sum", "--check", "SHA256SUMS"], cwd=profile,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        (profile / "README.md").write_text("tampered profile README\n")
+        rejected = subprocess.run(
+            ["sha256sum", "--check", "SHA256SUMS"], cwd=profile,
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("README.md: FAILED", rejected.stdout)
 
     def test_rejects_unrun_false_and_mismatched_acceptance_before_output(self) -> None:
         for field, value in (

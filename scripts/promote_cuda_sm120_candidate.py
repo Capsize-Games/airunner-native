@@ -483,13 +483,38 @@ def _safe_copy_tree(source: Path, destination: Path) -> None:
             raise PromotionError("candidate contains a symlink or special file")
 
 
+def _preserve_candidate_inventories(root: Path) -> None:
+    """Keep original candidate records separate from current profile inventories."""
+    historical = root / "provenance/candidate-inputs"
+    historical.mkdir()
+    for relative, name in (
+        ("SHA256SUMS", "SHA256SUMS.original"),
+        ("provenance/file-manifest.json", "file-manifest.original.json"),
+        ("README.md", "README.original.md"),
+    ):
+        source = root / relative
+        if source.exists():
+            source.rename(historical / name)
+
+
+def _write_profile_checksums(root: Path) -> None:
+    """Hash current profile files without circular manifest dependencies."""
+    excluded = {root / "SHA256SUMS", root / "profile-manifest.json"}
+    rows = [
+        f"{_sha256_file(path)}  {path.relative_to(root).as_posix()}"
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path not in excluded
+    ]
+    _write_text(root / "SHA256SUMS", "\n".join(rows) + "\n")
+
+
 def _profile_manifest(root: Path, candidate: dict[str, Any], producer: dict[str, Any], producer_hash: str) -> dict[str, Any]:
     """Create the selector-compatible strict profile manifest."""
     rows = []
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
             raise PromotionError("promoted profile contains a symlink")
-        if path.is_file() and path.name != "profile-manifest.json":
+        if path.is_file() and path != root / "profile-manifest.json":
             mode = stat.S_IMODE(path.stat().st_mode)
             if mode not in (0o644, 0o755) or mode & (stat.S_ISUID | stat.S_ISGID):
                 raise PromotionError("promoted profile contains an unsafe file mode")
@@ -730,6 +755,7 @@ def promote_candidate(
         profile_root = stage / PROFILE_ROOT_NAME
         profile_root.mkdir()
         _safe_copy_tree(candidate_root, profile_root)
+        _preserve_candidate_inventories(profile_root)
         promotion = {
             "schema": "airunner-native-cuda-promotion-v1",
             "promotion_source": {
@@ -757,8 +783,14 @@ def promote_candidate(
             "`provenance/promotion.json`. It binds this server archive to the selected "
             "model hash, a 32,768-token context, server-observed CUDA device identity, "
             "full offload of the server-reported offloadable layers, authenticated API "
-            "inference, and owned-process cleanup. The host supplies the NVIDIA driver.\n",
+            "inference, and owned-process cleanup. The host supplies the NVIDIA driver.\n\n"
+            "Original candidate inventories and README are retained, when present, in "
+            "`provenance/candidate-inputs/`; their paths and hashes describe the original "
+            "candidate tree. The root `SHA256SUMS` covers current profile files except "
+            "itself and `profile-manifest.json`. The profile manifest includes "
+            "`SHA256SUMS`; the release archive checksum binds the complete package.\n",
         )
+        _write_profile_checksums(profile_root)
         manifest = _profile_manifest(profile_root, candidate, producer, recipe_hash)
         _write_json(profile_root / "profile-manifest.json", manifest)
 
