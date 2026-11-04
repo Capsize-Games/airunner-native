@@ -10,7 +10,7 @@ The authoritative pins live in `runtime_pins.env`:
 - `llama.cpp` commit `47a39665e7081dc482feec169961acc09750a5c4`
   (`b10000`)
 - `whisper.cpp` commit `d1be6fde11ac6e0407606b4e42fe72d34add8037`
-  (`v1.9.5`)
+  (`v1.9.5`), with the separately hash-pinned API authentication patch
 
 These are exact commit hashes so AIRunner's runtime bundles do not drift
 with upstream `master`.
@@ -67,6 +67,7 @@ Each output contains:
 - `bin/whisper-server` or `bin/whisper-server.exe`
 - `share/airunner/runtime_manifest.env`
 - `share/airunner/runtime_pins.env`
+- `share/airunner/producer-recipe.json`
 
 The manifest records the upstream commits, target platform, selected CUDA
 architecture (or `compiler-default`), compiler/build-tool version strings,
@@ -75,9 +76,20 @@ binaries. The bundle also includes the upstream MIT license texts in
 `share/airunner/licenses/`. It describes the build that produced those files;
 it does not authenticate a downloaded release archive.
 
-The generated manifest points AIRunner at the bundled sidecar binaries
-using paths relative to `share/airunner/runtime_manifest.env` and matches the
-packaged bundle layout that installs AIRunner into `app/site-packages/`.
+Manifest version 2 records standalone native runtime facts. Binary paths are
+relative to `share/airunner/runtime_manifest.env`, as declared by
+`AIRUNNER_NATIVE_PATH_BASE=manifest-directory`. The archive contains no Python
+interpreter or application entry point. The earlier manifest's Python and
+application path fields are omitted; existing published archives are unchanged.
+
+Each build also records `share/airunner/producer-recipe.json`. The build and
+release packager verify that receipt against the committed source tree and the
+hashes of the recipe inputs. The Whisper authentication patch is pinned by
+SHA-256 in `runtime_pins.env`; the build checks its exact source commit and
+resulting diff before compiling. See
+`../review/whisper-api-auth-patch-v1.9.5.md` for current behavior and review
+scope. `../review/whisper-api-auth-patch.md` preserves the earlier v1.8.4
+record.
 
 ## CI
 

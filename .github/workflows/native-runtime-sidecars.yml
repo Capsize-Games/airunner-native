@@ -224,6 +224,31 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Download validated CUDA profile from the matching draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -er --arg tag "$GITHUB_REF_NAME" '
+              [.[] | select(.tag_name == $tag and .draft == true and .prerelease == false and .immutable != true)] |
+              if length == 1 then .[0].id else error("Missing matching CUDA candidate draft") end')"
+          records="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")"
+          for name in runtime-sidecars-linux-cuda-sm120a.tar.gz \
+              runtime-sidecars-linux-cuda-sm120a.tar.gz.sha256 \
+              runtime-sidecars-linux-cuda-sm120a-provenance.txt; do
+            asset_id="$(jq -er --arg name "$name" '
+              [.[] | select(.name == $name and .state == "uploaded" and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))] |
+              if length == 1 then .[0].id else error("Missing CUDA release asset") end' <<< "$records")"
+            expected="$(jq -er --argjson id "$asset_id" '.[] | select(.id == $id) | .digest' <<< "$records")"
+            gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              -H 'Accept: application/octet-stream' > "release-assets/$name"
+            actual="sha256:$(sha256sum "release-assets/$name" | cut -d ' ' -f1)"
+            test "$actual" = "$expected"
+          done
+
       - name: Create draft, attach verified assets, and publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -238,7 +263,10 @@ jobs:
             release-assets/runtime-sidecars-linux-provenance.txt \
             release-assets/runtime-sidecars-windows.tar.gz \
             release-assets/runtime-sidecars-windows.tar.gz.sha256 \
-            release-assets/runtime-sidecars-windows-provenance.txt
+            release-assets/runtime-sidecars-windows-provenance.txt \
+            release-assets/runtime-sidecars-linux-cuda-sm120a.tar.gz \
+            release-assets/runtime-sidecars-linux-cuda-sm120a.tar.gz.sha256 \
+            release-assets/runtime-sidecars-linux-cuda-sm120a-provenance.txt
 
   verify-published-release:
     if: github.event_name == 'release'

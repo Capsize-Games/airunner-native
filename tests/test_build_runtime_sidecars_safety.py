@@ -38,8 +38,49 @@ class SidecarSafetyTests(unittest.TestCase):
                 "WHISPER_CPP_REPOSITORY=https://github.com/ggerganov/whisper.cpp.git",
                 "WHISPER_CPP_COMMIT=d1be6fde11ac6e0407606b4e42fe72d34add8037",
                 "WHISPER_CPP_VERSION=v1.9.5",
+                "WHISPER_CPP_AUTH_PATCH_SHA256=572fe28464c442cc5df657fde57a19acc2a9f8031670a0c4f0e5a97bf38e440b",
             )
         ) + "\n"
+
+    def test_whisper_source_guard_rejects_unrelated_dirty_and_untracked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "whisper"
+            source.mkdir()
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            server = source / "examples/server/server.cpp"
+            server.parent.mkdir(parents=True)
+            server.write_text("upstream\n", encoding="utf-8")
+            (source / ".gitignore").write_text("ignored.tmp\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "examples/server/server.cpp", ".gitignore"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+            clean = self.run_shell(
+                'assert_whisper_source_clean_or_auth_patch "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+            (source / "examples/server/auth.hpp").write_text("auth\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "-N", "examples/server/auth.hpp"], check=True)
+            server.write_text("patched\n", encoding="utf-8")
+            valid = self.run_shell(
+                'assert_whisper_source_auth_patch_only "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            (source / "unrelated.tmp").write_text("unexpected\n", encoding="utf-8")
+            rejected = self.run_shell(
+                'assert_whisper_source_clean_or_auth_patch "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            (source / "unrelated.tmp").unlink()
+            (source / "ignored.tmp").write_text("ignored\n", encoding="utf-8")
+            ignored = self.run_shell(
+                'assert_whisper_source_clean_or_auth_patch "$TEST_SOURCE"',
+                env={"TEST_SOURCE": str(source)},
+            )
+            self.assertNotEqual(ignored.returncode, 0)
 
     def test_pin_payload_is_rejected_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -266,7 +307,9 @@ class SidecarSafetyTests(unittest.TestCase):
                 'LLAMA_CPP_COMMIT=47a39665e7081dc482feec169961acc09750a5c4; LLAMA_CPP_VERSION=b10000; '
                 'WHISPER_CPP_REPOSITORY=https://github.com/ggerganov/whisper.cpp.git; '
                 'WHISPER_CPP_COMMIT=d1be6fde11ac6e0407606b4e42fe72d34add8037; '
-                'WHISPER_CPP_VERSION=v1.9.5; write_manifest',
+                'WHISPER_CPP_VERSION=v1.9.5; '
+                'WHISPER_CPP_AUTH_PATCH_SHA256=572fe28464c442cc5df657fde57a19acc2a9f8031670a0c4f0e5a97bf38e440b; '
+                'write_manifest',
                 env={
                     "TEST_BUNDLE": str(bundle),
                     "TEST_PINS": str(pins),
@@ -275,6 +318,13 @@ class SidecarSafetyTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             manifest = (share_dir / "runtime_manifest.env").read_text(encoding="utf-8")
+            self.assertIn("AIRUNNER_NATIVE_MANIFEST_VERSION=2", manifest)
+            self.assertIn("AIRUNNER_NATIVE_COMPONENT=runtime-sidecars", manifest)
+            self.assertIn("AIRUNNER_NATIVE_PATH_BASE=manifest-directory", manifest)
+            self.assertIn("AIRUNNER_LLAMA_SERVER_BIN=../../bin/llama-server.exe", manifest)
+            self.assertIn("AIRUNNER_WHISPER_SERVER_BIN=../../bin/whisper-server.exe", manifest)
+            for absent in ("AIRUNNER_BUNDLE_ROOT=", "AIRUNNER_PYTHON=", "AIRUNNER_PYTHONPATH=", "AIRUNNER_ENTRYPOINT="):
+                self.assertNotIn(absent, manifest)
             self.assertIn("AIRUNNER_WINDOWS_RUNTIME_LINKAGE=static", manifest)
             self.assertIn("AIRUNNER_MINGW_GCC_RUNTIME_PACKAGE_VERSION=13.2.0-6ubuntu1+26.1", manifest)
             self.assertIn("AIRUNNER_MINGW_W64_PACKAGE_VERSION=11.0.1-3build1", manifest)
@@ -501,11 +551,18 @@ class SidecarSafetyTests(unittest.TestCase):
                 'LLAMA_CPP_VERSION=b10000; '
                 'WHISPER_CPP_REPOSITORY=https://github.com/ggerganov/whisper.cpp.git; '
                 'WHISPER_CPP_COMMIT=d1be6fde11ac6e0407606b4e42fe72d34add8037; '
-                'WHISPER_CPP_VERSION=v1.9.5; write_manifest',
+                'WHISPER_CPP_VERSION=v1.9.5; '
+                'WHISPER_CPP_AUTH_PATCH_SHA256=572fe28464c442cc5df657fde57a19acc2a9f8031670a0c4f0e5a97bf38e440b; '
+                'write_manifest',
                 env=env,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             manifest = (share_dir / "runtime_manifest.env").read_text(encoding="utf-8")
+            self.assertIn("AIRUNNER_NATIVE_MANIFEST_VERSION=2", manifest)
+            self.assertIn("AIRUNNER_LLAMA_SERVER_BIN=../../bin/llama-server\n", manifest)
+            self.assertIn("AIRUNNER_WHISPER_SERVER_BIN=../../bin/whisper-server\n", manifest)
+            for absent in ("AIRUNNER_BUNDLE_ROOT=", "AIRUNNER_PYTHON=", "AIRUNNER_PYTHONPATH=", "AIRUNNER_ENTRYPOINT="):
+                self.assertNotIn(absent, manifest)
             self.assertIn("AIRUNNER_LLAMA_CPP_COMMIT=47a39665e7081dc482feec169961acc09750a5c4", manifest)
             self.assertIn("AIRUNNER_CMAKE_VERSION=cmake\\ version\\ 3.test", manifest)
             self.assertIn("AIRUNNER_BUILD_JOBS=3", manifest)
@@ -513,6 +570,10 @@ class SidecarSafetyTests(unittest.TestCase):
             self.assertIn("AIRUNNER_CPU_BASELINE=GGML_NATIVE=OFF", manifest)
             self.assertIn(f"AIRUNNER_LLAMA_SERVER_SHA256={hashlib.sha256(llama).hexdigest()}", manifest)
             self.assertIn(f"AIRUNNER_WHISPER_SERVER_SHA256={hashlib.sha256(whisper).hexdigest()}", manifest)
+            self.assertIn(
+                "AIRUNNER_WHISPER_CPP_AUTH_PATCH_SHA256=572fe28464c442cc5df657fde57a19acc2a9f8031670a0c4f0e5a97bf38e440b",
+                manifest,
+            )
             self.assertTrue((share_dir / "runtime_pins.env").is_file())
 
 

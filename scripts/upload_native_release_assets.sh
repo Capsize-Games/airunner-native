@@ -86,7 +86,8 @@ if [[ "$mode" == verify-published-tag ]]; then
     release_id=$(jq -r .id <<< "$release_json")
     assets_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" -H "X-GitHub-Api-Version: $API_VERSION")
     for name in runtime-sidecars-linux.tar.gz runtime-sidecars-linux.tar.gz.sha256 runtime-sidecars-linux-provenance.txt \
-        runtime-sidecars-windows.tar.gz runtime-sidecars-windows.tar.gz.sha256 runtime-sidecars-windows-provenance.txt; do
+        runtime-sidecars-windows.tar.gz runtime-sidecars-windows.tar.gz.sha256 runtime-sidecars-windows-provenance.txt \
+        runtime-sidecars-linux-cuda-sm120a.tar.gz runtime-sidecars-linux-cuda-sm120a.tar.gz.sha256 runtime-sidecars-linux-cuda-sm120a-provenance.txt; do
         jq -e --arg name "$name" 'any(.[]; .name == $name and .state == "uploaded" and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))' <<< "$assets_json" >/dev/null || {
             echo "Published release is missing verified asset: $name" >&2; exit 1;
         }
@@ -95,9 +96,10 @@ if [[ "$mode" == verify-published-tag ]]; then
 fi
 
 expected_names=(runtime-sidecars-linux.tar.gz runtime-sidecars-linux.tar.gz.sha256 runtime-sidecars-linux-provenance.txt \
-    runtime-sidecars-windows.tar.gz runtime-sidecars-windows.tar.gz.sha256 runtime-sidecars-windows-provenance.txt)
+    runtime-sidecars-windows.tar.gz runtime-sidecars-windows.tar.gz.sha256 runtime-sidecars-windows-provenance.txt \
+    runtime-sidecars-linux-cuda-sm120a.tar.gz runtime-sidecars-linux-cuda-sm120a.tar.gz.sha256 runtime-sidecars-linux-cuda-sm120a-provenance.txt)
 if [[ ${#assets[@]} -ne ${#expected_names[@]} ]]; then
-    echo "Promotion needs the six Linux and Windows bundle, checksum, and provenance assets" >&2; exit 2
+    echo "Promotion needs all nine CPU Linux, CPU Windows, and CUDA SM120a bundle, checksum, and provenance assets" >&2; exit 2
 fi
 declare -A requested_names=()
 for index in "${!assets[@]}"; do
@@ -108,7 +110,7 @@ for index in "${!assets[@]}"; do
     requested_names[$expected]=1
 done
 
-for platform in linux windows; do
+for platform in linux windows linux-cuda-sm120a; do
     archive="runtime-sidecars-$platform.tar.gz"; checksum="$archive.sha256"
     provenance="runtime-sidecars-$platform-provenance.txt"
     for asset in "${assets[@]}"; do

@@ -1,0 +1,193 @@
+diff --git a/examples/server/auth.hpp b/examples/server/auth.hpp
+new file mode 100644
+index 00000000..062f0e58
+--- /dev/null
++++ b/examples/server/auth.hpp
+@@ -0,0 +1,96 @@
++#pragma once
++
++#include "httplib.h"
++
++#include <algorithm>
++#include <array>
++#include <cctype>
++#include <fstream>
++#include <string>
++
++namespace whisper_server_auth {
++
++inline bool is_loopback_bind_host(const std::string & host) {
++    return host == "127.0.0.1" || host == "::1" || host == "localhost";
++}
++
++inline bool load_api_key_file(const std::string & path, std::string & key) {
++    std::ifstream input(path, std::ios::binary);
++    if (!input) {
++        return false;
++    }
++
++    // Read at most the maximum token length plus one newline and one overflow
++    // byte. This keeps an attacker-controlled file from growing the key buffer.
++    std::array<char, 4098> buffer{};
++    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
++    const auto count = static_cast<size_t>(input.gcount());
++    if (input.bad() || count == buffer.size()) {
++        return false;
++    }
++
++    if (count > 0 && buffer[count - 1] == '\n') {
++        key.assign(buffer.data(), count - 1);
++    } else {
++        key.assign(buffer.data(), count);
++    }
++    if (key.empty() || key.size() > 4096) {
++        return false;
++    }
++    return std::none_of(key.begin(), key.end(), [](unsigned char ch) {
++        return std::isspace(ch) || std::iscntrl(ch);
++    });
++}
++
++inline bool constant_time_equal(const std::string & left, const std::string & right) {
++    const size_t count = std::max(left.size(), right.size());
++    size_t difference = left.size() ^ right.size();
++    for (size_t index = 0; index < count; ++index) {
++        const unsigned char a = index < left.size()
++            ? static_cast<unsigned char>(left[index]) : 0;
++        const unsigned char b = index < right.size()
++            ? static_cast<unsigned char>(right[index]) : 0;
++        difference |= static_cast<size_t>(a ^ b);
++    }
++    return difference == 0;
++}
++
++inline httplib::Server::HandlerWithResponse make_pre_routing_handler(
++    const std::string & api_key,
++    const std::string & request_path
++) {
++    const std::string health_path = request_path + "/health";
++    return [&api_key, health_path](
++        const httplib::Request & req,
++        httplib::Response & res
++    ) {
++        if (req.method == "GET" && req.path == health_path) {
++            return httplib::Server::HandlerResponse::Unhandled;
++        }
++        const std::string authorization = req.get_header_value("Authorization");
++        const std::string bearer_prefix = "Bearer ";
++        if (authorization.compare(0, bearer_prefix.size(), bearer_prefix) == 0
++            && constant_time_equal(
++                authorization.substr(bearer_prefix.size()), api_key)) {
++            return httplib::Server::HandlerResponse::Unhandled;
++        }
++        res.status = 401;
++        res.set_header("WWW-Authenticate", "Bearer");
++        res.set_content("{\"error\":\"unauthorized\"}", "application/json");
++        return httplib::Server::HandlerResponse::Handled;
++    };
++}
++
++inline void handle_server_error(
++    const httplib::Request & req,
++    httplib::Response & res
++) {
++    if (res.status == 400) {
++        res.set_content("Invalid request", "text/plain");
++    } else if (res.status != 401 && res.status != 500) {
++        res.set_content("File Not Found (" + req.path + ")", "text/plain");
++        res.status = 404;
++    }
++}
++
++}  // namespace whisper_server_auth
+diff --git a/examples/server/server.cpp b/examples/server/server.cpp
+index b745f4d7..17fa20a0 100644
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "whisper.h"
+ #include "httplib.h"
++#include "auth.hpp"
+ #include "json.hpp"
+ 
+ #include <cfloat>
+@@ -61,6 +62,7 @@ struct server_params
+     std::string request_path   = "";
+     std::string inference_path = "/inference";
+     std::string tmp_dir        = ".";
++    std::string api_key_file;
+ 
+     int32_t port          = 8080;
+     int32_t read_timeout  = 600;
+@@ -173,6 +175,7 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
+     fprintf(stderr, "  --public PATH,                         [%-7s] Path to the public folder\n",                               sparams.public_path.c_str());
+     fprintf(stderr, "  --request-path PATH,                   [%-7s] Request path for all requests\n",                           sparams.request_path.c_str());
+     fprintf(stderr, "  --inference-path PATH,                 [%-7s] Inference path for all requests\n",                         sparams.inference_path.c_str());
++    fprintf(stderr, "  --api-key-file PATH,                   require Bearer authentication using a private key file\n");
+     fprintf(stderr, "  --convert,                             [%-7s] Convert audio to WAV, requires ffmpeg on the server\n",     sparams.ffmpeg_converter ? "true" : "false");
+     fprintf(stderr, "  --tmp-dir,                             [%-7s] Temporary directory for ffmpeg transcoded files\n",         sparams.tmp_dir.c_str());
+     fprintf(stderr, "  -sns,      --suppress-nst              [%-7s] suppress non-speech tokens\n",                              params.suppress_nst ? "true" : "false");
+@@ -253,6 +256,13 @@ bool whisper_params_parse(int argc, char ** argv, whisper_params & params, serve
+         else if (                   arg == "--public")          { sparams.public_path = argv[++i]; }
+         else if (                   arg == "--request-path")    { sparams.request_path = argv[++i]; }
+         else if (                   arg == "--inference-path")  { sparams.inference_path = argv[++i]; }
++        else if (                   arg == "--api-key-file")    {
++            if (i + 1 >= argc || argv[i + 1][0] == '\0') {
++                fprintf(stderr, "error: --api-key-file requires a path\n");
++                return false;
++            }
++            sparams.api_key_file = argv[++i];
++        }
+         else if (                   arg == "--convert")         { sparams.ffmpeg_converter     = true; }
+         else if (                   arg == "--tmp-dir")         { sparams.tmp_dir     = argv[++i]; }
+ 
+@@ -651,6 +661,17 @@ int main(int argc, char ** argv) {
+         return 1;
+     }
+ 
++    std::string api_key;
++    if (sparams.api_key_file.empty()) {
++        if (!whisper_server_auth::is_loopback_bind_host(sparams.hostname)) {
++            fprintf(stderr, "error: --api-key-file is required for non-loopback binds\n");
++            return 1;
++        }
++    } else if (!whisper_server_auth::load_api_key_file(sparams.api_key_file, api_key)) {
++        fprintf(stderr, "error: unable to read a valid API key file\n");
++        return 1;
++    }
++
+     if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1) {
+         fprintf(stderr, "error: unknown language '%s'\n", params.language.c_str());
+         whisper_print_usage(argc, argv, params, sparams);
+@@ -723,6 +744,14 @@ int main(int argc, char ** argv) {
+     std::unique_ptr<httplib::Server> svr = std::make_unique<httplib::Server>();
+     std::atomic<server_state> state{SERVER_STATE_LOADING_MODEL};
+ 
++    if (!api_key.empty()) {
++        svr->set_pre_routing_handler(
++            whisper_server_auth::make_pre_routing_handler(
++                api_key, sparams.request_path
++            )
++        );
++    }
++
+     struct whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
+ 
+     if (ctx == nullptr) {
+@@ -1240,14 +1269,7 @@ int main(int argc, char ** argv) {
+         res.status = 500;
+     });
+ 
+-    svr->set_error_handler([](const Request &req, Response &res) {
+-        if (res.status == 400) {
+-            res.set_content("Invalid request", "text/plain");
+-        } else if (res.status != 500) {
+-            res.set_content("File Not Found (" + req.path + ")", "text/plain");
+-            res.status = 404;
+-        }
+-    });
++    svr->set_error_handler(whisper_server_auth::handle_server_error);
+ 
+     // set timeouts and change hostname and port
+     svr->set_read_timeout(sparams.read_timeout);

@@ -19,6 +19,7 @@ platform="$1"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bundle_dir="${AIRUNNER_SIDECAR_BUNDLE_DIR:-$root_dir/build/runtime-sidecars/$platform}"
 manifest="$bundle_dir/share/airunner/runtime_manifest.env"
+producer_recipe="$bundle_dir/share/airunner/producer-recipe.json"
 output_dir="${AIRUNNER_SIDECAR_RELEASE_OUTPUT_DIR:-$root_dir}"
 mkdir -p -- "$output_dir"
 archive="$output_dir/runtime-sidecars-$platform.tar.gz"
@@ -29,6 +30,12 @@ if [[ ! -d "$bundle_dir" || -L "$bundle_dir" || ! -f "$manifest" || -L "$manifes
     echo "Expected built bundle and regular runtime manifest for $platform" >&2
     exit 1
 fi
+if [[ ! -f "$producer_recipe" || -L "$producer_recipe" ]]; then
+    echo "Expected regular producer recipe receipt for $platform" >&2
+    exit 1
+fi
+python3 "$root_dir/scripts/native_recipe_identity.py" verify \
+    --profile cpu --output "$producer_recipe"
 source_provenance="$bundle_dir/share/airunner/source_provenance.env"
 if [[ -L "$source_provenance" || ( -e "$source_provenance" && ! -f "$source_provenance" ) ]]; then
     echo "Refusing unexpected source provenance path: $source_provenance" >&2
@@ -66,6 +73,8 @@ printf '%s  %s\n' "$archive_sha" "$(basename "$archive")" > "$checksum"
     printf 'gzip_version=%s\n' "$(gzip --version | sed -n '1p')"
     printf '\n# Build tool versions, pinned native source revisions, and binary hashes:\n'
     cat "$manifest"
+    printf '\n# Committed producer recipe receipt:\n'
+    cat "$producer_recipe"
     printf '\n# Archive metadata is normalized; compiled binaries are not claimed byte-reproducible.\n'
 } > "$provenance"
 

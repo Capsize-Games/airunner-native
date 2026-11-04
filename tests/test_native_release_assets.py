@@ -8,6 +8,7 @@ import os
 import subprocess
 import tarfile
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -60,6 +61,11 @@ if args[0] == "api":
             print(json.dumps([release]))
     elif route.endswith("/assets?per_page=100"):
         print(json.dumps(state["assets"]))
+    elif "/releases/assets/" in route:
+        asset_id = int(route.rsplit("/", 1)[1])
+        record = next(item for item in state["assets"] if item["id"] == asset_id)
+        sys.stdout.buffer.write(Path(record["fixture_path"]).read_bytes())
+        log("DOWNLOAD " + record["name"])
     elif route.endswith("/releases/71") and method == "PATCH":
         state["release"]["draft"] = False
         state["release"]["immutable"] = os.environ.get("FAKE_PUBLISH_IMMUTABLE", "true") == "true"
@@ -126,7 +132,7 @@ else:
         bin_dir.mkdir()
         self.make_fake_gh(bin_dir)
         assets = []
-        for platform in ("linux", "windows"):
+        for platform in ("linux", "windows", "linux-cuda-sm120a"):
             archive = root / f"runtime-sidecars-{platform}.tar.gz"
             archive.write_bytes(f"{platform} fixture archive".encode())
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -215,6 +221,8 @@ else:
         self.assertIn("llama-server\" --help", smoke)
         self.assertIn("whisper-server\" --help", smoke)
         self.assertIn("needs: [smoke-sidecars]", promote)
+        self.assertIn("Download validated CUDA profile from the matching draft", promote)
+        self.assertIn("runtime-sidecars-linux-cuda-sm120a.tar.gz", promote)
         self.assertIn("scripts/check_windows_runtime_imports.sh", build)
         self.assertLess(build.index("Build pinned sidecar bundle"), build.index("Reject dynamic MinGW runtime imports"))
         self.assertLess(build.index("Reject dynamic MinGW runtime imports"), build.index("Package sidecar bundle and provenance"))
@@ -238,6 +246,23 @@ else:
                 )
                 (bundle / "bin").mkdir(parents=True, exist_ok=True)
                 (bundle / "bin" / "fixture-server").write_bytes(b"fixture binary bytes")
+                (manifest.parent / "producer-recipe.json").write_text(
+                    '{"schema":"airunner-native-producer-recipe-v1"}\n',
+                    encoding="utf-8",
+                )
+                tools = root / "tools"
+                tools.mkdir()
+                python = tools / "python3"
+                python.write_text(
+                    "#!/bin/sh\n"
+                    "if [ \"$1\" = \"" + str(REPO / "scripts/native_recipe_identity.py") + "\" ] && [ \"$2\" = verify ]; then\n"
+                    "  test \"$4\" = cpu && test \"$5\" = --output && test -s \"$6\"\n"
+                    "  exit $?\n"
+                    "fi\n"
+                    "exec /usr/bin/python3 \"$@\"\n",
+                    encoding="utf-8",
+                )
+                python.chmod(0o755)
                 env = os.environ.copy()
                 env.update({
                     "GITHUB_REPOSITORY": "Capsize-Games/airunner-native",
@@ -245,6 +270,7 @@ else:
                     "GITHUB_REF": "refs/tags/v0.2.0",
                     "AIRUNNER_SIDECAR_RELEASE_OUTPUT_DIR": str(root / "assets"),
                     "AIRUNNER_SIDECAR_BUNDLE_DIR": str(bundle),
+                    "PATH": f"{tools}:{os.environ['PATH']}",
                 })
                 first = subprocess.run(["bash", str(PACKAGE_SCRIPT), "linux"], env=env, capture_output=True, text=True, check=False)
                 self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
@@ -259,6 +285,9 @@ else:
                     embedded = packed.extractfile("./share/airunner/source_provenance.env")
                     self.assertIsNotNone(embedded)
                     self.assertIn(f"source_sha={SOURCE_SHA}", embedded.read().decode("utf-8"))
+                    recipe = packed.extractfile("./share/airunner/producer-recipe.json")
+                    self.assertIsNotNone(recipe)
+                    self.assertIn("airunner-native-producer-recipe-v1", recipe.read().decode("utf-8"))
                 checksum = (asset_dir / "runtime-sidecars-linux.tar.gz.sha256").read_text(encoding="utf-8")
                 self.assertIn(digest_before, checksum)
                 provenance = (asset_dir / "runtime-sidecars-linux-provenance.txt").read_text(encoding="utf-8")
@@ -287,7 +316,7 @@ else:
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertFalse(state["release"]["draft"])
             self.assertTrue(state["release"]["immutable"])
-            self.assertEqual(len(state["assets"]), 6)
+            self.assertEqual(len(state["assets"]), 9)
 
     def test_upload_rejects_lightweight_tag_and_mismatched_remote_peel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -331,7 +360,7 @@ else:
             self.assertNotEqual(result.returncode, 0)
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertTrue(state["release"]["draft"])
-            self.assertEqual(len(state["assets"]), 4)
+            self.assertEqual(len(state["assets"]), 7)
             retry = subprocess.run(
                 ["bash", str(UPLOAD_SCRIPT), "v0.2.0", *map(str, assets)],
                 cwd=repo, env=env, capture_output=True, text=True, check=False,
@@ -339,15 +368,85 @@ else:
             self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertFalse(state["release"]["draft"])
-            self.assertEqual(len(state["assets"]), 6)
+            self.assertEqual(len(state["assets"]), 9)
             self.assertEqual(log.read_text(encoding="utf-8").count("CREATE v0.2.0"), 1)
+
+    def test_cpu_only_promotion_is_rejected_before_release_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared, log, state_path, repo, _source, env, assets = self.run_upload(
+                Path(temporary), mode="check-tag"
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            result = subprocess.run(
+                ["bash", str(UPLOAD_SCRIPT), "v0.2.0", *map(str, assets[:6])],
+                cwd=repo, env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("all nine", result.stderr)
+            self.assertIsNone(json.loads(state_path.read_text())["release"])
+            self.assertFalse(log.exists())
+
+    def test_cuda_checksum_mismatch_is_rejected_before_release_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared, log, state_path, repo, _source, env, assets = self.run_upload(
+                Path(temporary), mode="check-tag"
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            assets[7].write_text("0" * 64 + "  " + assets[6].name + "\n")
+            result = subprocess.run(
+                ["bash", str(UPLOAD_SCRIPT), "v0.2.0", *map(str, assets)],
+                cwd=repo, env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("checksum does not match: runtime-sidecars-linux-cuda-sm120a.tar.gz", result.stderr)
+            self.assertIsNone(json.loads(state_path.read_text())["release"])
+            self.assertFalse(log.exists())
+
+    def test_workflow_downloads_exact_draft_cuda_assets_and_rejects_digest_drift(self) -> None:
+        workflow = (REPO / ".github/workflows/native-runtime-sidecars.yml").read_text()
+        step = workflow.split("      - name: Download validated CUDA profile from the matching draft\n", 1)[1]
+        command = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+        for corrupt in (False, True):
+            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as temporary:
+                prepared, log, state_path, repo, _source, env, assets = self.run_upload(
+                    Path(temporary), mode="check-tag"
+                )
+                self.assertEqual(prepared.returncode, 0, prepared.stderr)
+                records = [
+                    {"id": index + 1, "name": path.name, "state": "uploaded",
+                     "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+                     "fixture_path": str(path)}
+                    for index, path in enumerate(assets[6:])
+                ]
+                if corrupt:
+                    records[0]["digest"] = "sha256:" + "0" * 64
+                state_path.write_text(json.dumps({
+                    "release": {"id": 71, "tag_name": "v0.2.0", "draft": True,
+                                "prerelease": False, "immutable": False},
+                    "assets": records,
+                }))
+                destination = repo / "release-assets"
+                destination.mkdir()
+                result = subprocess.run(
+                    ["bash", "-c", command], cwd=repo, env=env,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode == 0, not corrupt, result.stderr)
+                if not corrupt:
+                    for path in assets[6:]:
+                        self.assertEqual((destination / path.name).read_bytes(), path.read_bytes())
+                self.assertTrue(json.loads(state_path.read_text())["release"]["draft"])
+                calls = log.read_text()
+                self.assertNotIn("CREATE ", calls)
+                self.assertNotIn("UPLOAD ", calls)
+                self.assertNotIn("PATCH ", calls)
 
     def test_published_event_verification_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo, source, _tag_object = self.make_git_repo(root)
             assets = []
-            for platform in ("linux", "windows"):
+            for platform in ("linux", "windows", "linux-cuda-sm120a"):
                 archive = root / f"runtime-sidecars-{platform}.tar.gz"
                 archive.write_bytes(f"{platform} fixture archive".encode())
                 checksum = root / f"{archive.name}.sha256"
@@ -383,6 +482,42 @@ else:
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(log.exists())
+            state = json.loads(state_path.read_text())
+            state["assets"] = [item for item in api_assets if "cuda-sm120a" not in item["name"]]
+            state_path.write_text(json.dumps(state))
+            missing = subprocess.run(
+                ["bash", str(UPLOAD_SCRIPT), "--verify-published-tag", "v0.2.0"],
+                cwd=repo, env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("missing verified asset: runtime-sidecars-linux-cuda-sm120a", missing.stderr)
+            self.assertFalse(log.exists())
+
+    def test_package_requires_producer_recipe_before_creating_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            manifest = bundle / "share" / "airunner" / "runtime_manifest.env"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("AIRUNNER_TARGET_PLATFORM=linux\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "GITHUB_REPOSITORY": "Capsize-Games/airunner-native",
+                "GITHUB_SHA": SOURCE_SHA,
+                "GITHUB_REF": "refs/tags/v0.2.0",
+                "AIRUNNER_SIDECAR_RELEASE_OUTPUT_DIR": str(root / "assets"),
+                "AIRUNNER_SIDECAR_BUNDLE_DIR": str(bundle),
+            })
+            result = subprocess.run(
+                ["bash", str(PACKAGE_SCRIPT), "linux"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("producer recipe receipt", result.stderr)
+            self.assertFalse((root / "assets" / "runtime-sidecars-linux.tar.gz").exists())
 
     def test_promotion_fails_when_published_release_is_not_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
